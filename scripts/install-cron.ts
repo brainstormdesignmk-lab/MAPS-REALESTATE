@@ -21,7 +21,9 @@
 
 import { execSync } from 'child_process';
 
-const APP_DIR = '/srv/app';
+// Hub app dir — override with MAPS_APP_DIR if the repo lives elsewhere
+// (default: the conventional T60 location).
+const APP_DIR = process.env.MAPS_APP_DIR ?? '/srv/app';
 
 const LINES = [
   // Monthly refresh — POI restore (OSM), SerpApi top-up, queue drain, poison sweep
