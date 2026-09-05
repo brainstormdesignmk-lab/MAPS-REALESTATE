@@ -10,6 +10,7 @@
  */
 
 import Database from 'better-sqlite3';
+import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as dotenv from 'dotenv';
@@ -61,30 +62,37 @@ function main(): void {
   }
 
   // 2) Runtime DB (lina.db) — landmark cache tiers + re-resolve queue.
+  //    On a pure MAP HUB (T60/T620) this DB legitimately doesn't exist — the
+  //    hub only owns the map + Supabase backup. Report ABSENT (not a problem);
+  //    only a CORRUPT/unopenable existing DB counts as degraded.
   //    Schema-defensive: a pre-migration DB has no `tier` column (address_key
   //    era) — report what actually exists instead of crashing on a column.
-  const lina = open(LINA_DB, 'runtime DB');
-  if (lina) {
-    const lmCols = lina.prepare('PRAGMA table_info(landmarks)').all() as Array<{ name: string }>;
-    if (lmCols.some(c => c.name === 'tier')) {
-      const tiers = lina.prepare(
-        'SELECT tier, COUNT(*) as c FROM landmarks GROUP BY tier ORDER BY c DESC'
-      ).all() as Array<{ tier: string | null; c: number }>;
-      log(`Landmark cache: ${tiers.length === 0 ? 'empty' : tiers.map(t => `${t.tier ?? 'null'}=${t.c}`).join(', ')}`);
+  if (fs.existsSync(LINA_DB)) {
+    const lina = open(LINA_DB, 'runtime DB');
+    if (lina) {
+      const lmCols = lina.prepare('PRAGMA table_info(landmarks)').all() as Array<{ name: string }>;
+      if (lmCols.some(c => c.name === 'tier')) {
+        const tiers = lina.prepare(
+          'SELECT tier, COUNT(*) as c FROM landmarks GROUP BY tier ORDER BY c DESC'
+        ).all() as Array<{ tier: string | null; c: number }>;
+        log(`Landmark cache: ${tiers.length === 0 ? 'empty' : tiers.map(t => `${t.tier ?? 'null'}=${t.c}`).join(', ')}`);
+      } else {
+        const sources = lina.prepare(
+          'SELECT source, COUNT(*) as c FROM landmarks GROUP BY source ORDER BY c DESC'
+        ).all() as Array<{ source: string; c: number }>;
+        log(`Landmark cache (pre-tier schema): ${sources.length === 0 ? 'empty' : sources.map(s => `${s.source}=${s.c}`).join(', ')}`);
+      }
+      let queue = 0;
+      try { queue = readOne(lina, 'SELECT COUNT(*) as c FROM geo_reresolve_queue'); } catch { queue = -1; }
+      log(`Re-resolve queue: ${queue < 0 ? 'n/a (no queue table)' : `${queue} rows`}`);
+      lina.close();
     } else {
-      const sources = lina.prepare(
-        'SELECT source, COUNT(*) as c FROM landmarks GROUP BY source ORDER BY c DESC'
-      ).all() as Array<{ source: string; c: number }>;
-      log(`Landmark cache (pre-tier schema): ${sources.length === 0 ? 'empty' : sources.map(s => `${s.source}=${s.c}`).join(', ')}`);
+      problems++;
     }
-    let queue = 0;
-    try { queue = readOne(lina, 'SELECT COUNT(*) as c FROM geo_reresolve_queue'); } catch { queue = -1; }
-    log(`Re-resolve queue: ${queue < 0 ? 'n/a (no queue table)' : `${queue} rows`}`);
-    lina.close();
   } else {
-    problems++;
+    log('Runtime DB: absent (pure map hub — landmark cache lives on the bot machines)');
   }
-
+  
   if (problems > 0) {
     log('HEALTH: DEGRADED (a DB could not be opened)');
     process.exit(1);
