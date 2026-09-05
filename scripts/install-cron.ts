@@ -25,11 +25,18 @@ import { execSync } from 'child_process';
 // (default: the conventional T60 location).
 const APP_DIR = process.env.MAPS_APP_DIR ?? '/srv/app';
 
+// Node bin dir — hubs with a SELF-CONTAINED .node/ inside the repo (T60/T620
+// pattern) set MAPS_NODE_BIN=<repo>/.node/bin so the cron line gets an
+// ABSOLUTE path. Cron runs with a minimal env: a bare `npx` only works when
+// node is on the system PATH.
+const NODE_BIN = process.env.MAPS_NODE_BIN ?? '';
+const TSX = NODE_BIN ? `${NODE_BIN}/npx tsx` : 'npx tsx';
+
 const LINES = [
   // Monthly refresh — POI restore (OSM), SerpApi top-up, queue drain, poison sweep
-  `0 4 1 * * cd ${APP_DIR} && npx tsx scripts/refresh-monthly.ts >> logs/refresh.log 2>&1`,
+  `0 4 1 * * cd ${APP_DIR} && ${TSX} scripts/refresh-monthly.ts >> logs/refresh.log 2>&1`,
   // Daily healthcheck — read-only state snapshot (POIs by source, landmark tiers, queue)
-  `0 5 * * * cd ${APP_DIR} && npx tsx scripts/healthcheck.ts >> logs/health.log 2>&1`,
+  `0 5 * * * cd ${APP_DIR} && ${TSX} scripts/healthcheck.ts >> logs/health.log 2>&1`,
 ];
 
 function currentCrontab(): string {
@@ -72,6 +79,7 @@ function install(): number {
   const additions = missing.map(s => s.line).join('\n');
   const next = cron.trimEnd() + (cron.trimEnd() ? '\n' : '') + additions + '\n';
   execSync(`crontab -`, { input: next, encoding: 'utf8' });
+  execSync(`mkdir -p '${APP_DIR}/logs'`); // >> logs/x.log fails without the dir
   console.log(`Installed ${missing.length} cron line(s):`);
   for (const s of missing) console.log(`  ${s.line}`);
   console.log('Logs land in logs/refresh.log + logs/health.log (created by cron).');
