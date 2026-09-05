@@ -1,0 +1,40 @@
+{
+  "name": "maps-realestate",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Standalone Skopje maps/geo stack — offline POI map build, Supabase backup data-hub, geo-watcher, monthly refresh. Redeployable to any machine with the maps role (T60 hub, T620 failover).",
+  "engines": {
+    "node": ">=16.20.0"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/*.test.ts",
+    "map:build": "tsx scripts/rebuild_map.ts",
+    "map:google": "tsx scripts/buildGoogleMap.ts",
+    "map:apply-overrides": "tsx scripts/apply_overrides.ts",
+    "map:upgrade-bare": "tsx scripts/upgrade-bare-rows.ts",
+    "watch": "tsx scripts/geo-watcher.ts",
+    "watch:once": "tsx scripts/geo-watcher.ts --once",
+    "refresh": "tsx scripts/refresh-monthly.ts",
+    "health": "tsx scripts/healthcheck.ts",
+    "backfill": "tsx scripts/backfill-geo.ts",
+    "place-urls": "tsx scripts/capture-place-urls.ts",
+    "cron:install": "tsx scripts/install-cron.ts --install",
+    "cron:check": "tsx scripts/install-cron.ts --check",
+    "backup": "tsx scripts/backup.ts",
+    "backup:serve": "tsx scripts/serve-backup.ts",
+    "backup:restore": "tsx scripts/restore.ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "8.7.0",
+    "dotenv": "^16.4.5",
+    "undici": "^5.28.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.11",
+    "@types/node": "^18.19.31",
+    "tsx": "3.13.0",
+    "typescript": "^5.5.4"
+  }
+}

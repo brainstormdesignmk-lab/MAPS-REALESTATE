@@ -1,0 +1,60 @@
+# t60-env.example — environment template for the T60 (Hermes) machine.
+#
+# Copy to ~/.lina/lina.env on the T60 and fill in the blank values:
+#   mkdir -p ~/.lina && chmod 700 ~/.lina
+#   cp scripts/t60-env.example ~/.lina/lina.env
+#   chmod 600 ~/.lina/lina.env
+#   nano ~/.lina/lina.env   # fill in blanks
+#
+# Most values come from the main lina.env.example — only the T60-specific
+# ones are listed here. The rest (VIBER_TOKEN, GEMINI_API_KEY, etc.) are
+# only needed on the Lina machine, not on the Hermes box.
+
+# === Supabase (edge function deploy + direct REST) ===
+# The Supabase project URL — used by Hermes to call the edge functions.
+# Format: https://<project-ref>.supabase.co
+SUPABASE_URL=
+
+# Hermes API key — the shared secret the edge functions check.
+# Generated during deploy (scripts/deploy-supabase.sh) or from the Supabase dashboard.
+HERMES_API_KEY=
+
+# === Landmarks: import-time resolver ===
+# Where to push the resolved landmark list (the update-property-landmarks function).
+# Full URL: $SUPABASE_URL/functions/v1/update-property-landmarks
+HERMES_LANDMARKS_WRITE_URL=
+
+# === Price sync: Hermes → public app ===
+# Where to push owner-dictated price changes (the update-property-price function).
+# Full URL: $SUPABASE_URL/functions/v1/update-property-price
+HERMES_WRITE_URL=
+
+# Auth header name — must match what the edge function checks.
+HERMES_AUTH_HEADER=x-admin-token
+
+# === Hermes' own reasoning LLM (NVIDIA NIM, OpenAI-compatible) ===
+# The landmark resolver uses Hermes' own brain — free tier, separate from
+# Lina's Gemini/Groq quota.
+HERMES_LLM_BASE_URL=https://integrate.api.nvidia.com/v1
+HERMES_LLM_API_KEY=
+HERMES_LLM_MODEL=nvidia/nvidia-nemotron-nano-9b-v2
+
+# === Offline OSM map of Skopje ===
+# Local SQLite store of named POIs + addresses. Built by `npm run map:pull`.
+# When present, the resolver reads POIs from here instead of live Overpass.
+SKOPJE_POIS_DB=
+
+# === Property feed (how Hermes reads the property list) ===
+# The feed URL — Hermes imports properties from here to know what to resolve.
+PROPERTY_DATA_URL=
+
+# === Two-machine bridge (when Hermes is on its own box) ===
+# Public base URL of Lina's /hermes/v1 API. When set, hermes scripts run
+# REMOTE (pull work, push results) instead of reading a local DB.
+LINA_API_URL=
+
+# Shared token for the /hermes/v1 API.
+HERMES_TOKEN=
+
+# === Store / sessions (only if Hermes reads the local DB directly) ===
+DB_PATH=data/lina.db
