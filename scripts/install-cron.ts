@@ -37,6 +37,9 @@ const LINES = [
   `0 4 1 * * cd ${APP_DIR} && ${TSX} scripts/refresh-monthly.ts >> logs/refresh.log 2>&1`,
   // Daily healthcheck — read-only state snapshot (POIs by source, landmark tiers, queue)
   `0 5 * * * cd ${APP_DIR} && ${TSX} scripts/healthcheck.ts >> logs/health.log 2>&1`,
+  // Weekly map build — OSM POIs + addresses → atomic .tmp rename, overrides folded.
+  // Free (Overpass only, no SerpApi). Keeps the hub's map fresh for deploy_map.
+  `17 3 * * 0 cd ${APP_DIR} && ${TSX} scripts/rebuild_map.ts >> logs/map-weekly.log 2>&1`,
 ];
 
 function currentCrontab(): string {
