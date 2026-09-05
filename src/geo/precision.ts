@@ -1,3 +1,5 @@
+import { translitToLatin } from './offlineMap';
+
 export const R_EARTH = 6371000;
 
 export function distM(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -29,6 +31,15 @@ export function walkMinutes(meters: number): number {
 //       into the cid. This is the primary landmark link.
 // The landmark/property NAME is carried in the reply TEXT ("во близина на …"),
 // never in the URL.
+
+/** ASCII-safe search term from a landmark name: canonical transliteration
+ *  (Cyrillic→Latin, same table the offline map dedupe uses) + strip to letters,
+ *  digits and single spaces. Empty when nothing usable survives — e.g. a name
+ *  that was ONLY punctuation/emoji. */
+export function asciiSearchName(name: string): string {
+  const t = translitToLatin(name);
+  return t.replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+}
 
 // Hex place_id → decimal cid (Google's canonical deep-link id).
 // "0x135415004f259205:0xe6d8969b475a5b1e" → 16634210817354128158
@@ -65,15 +76,20 @@ export function fullCoordsLink(lat: number, lon: number): string {
 }
 
 // Landmark link — priority order:
-//   1. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
+//   1. A stored google.com/maps URL (canonical place_url from the capture
+//      script) — emitted verbatim, original Google.
+//   2. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
 //      Google's own domain, ~49 chars (truncation-proof, verified in browser).
-//   2. A stored google.com/maps URL (canonical place_url from the capture
-//      script) is emitted verbatim — also original Google.
-//   3. @-view at the POI coordinates — original Google, short, opens the point.
+//   3. ASCII name search via maps.google.com/?q=<latin name> — original Google,
+//      opens the NAMED landmark (a place card, not a bare view). Cyrillic is
+//      transliterated with the same canonical table the offline map uses; the
+//      URL is length-guarded at 57 chars because the console that renders
+//      Lina's replies cuts long URLs mid-encoding.
+//   4. @-view at the POI coordinates — ONLY when no usable name exists (the
+//      user rejected bare-coordinate views: they open a map with no landmark).
 // Never: tinyurl (third-party shortener — agency refuses it), never
 // percent-encoded Cyrillic name searches, never bare query=lat,lon.
 export function landmarkLink(name: string, placeId: string | null, lat: number, lon: number, placeUrl?: string): string {
-  const clean = (name || '').trim();
   // BEST: a stored ORIGINAL Google URL (canonical place URL captured by
   // scripts/capture-place-urls.ts). Only google.com/maps links are accepted —
   // tinyurl/other shorteners are never emitted.
@@ -85,15 +101,16 @@ export function landmarkLink(name: string, placeId: string | null, lat: number, 
     const cid = cidLink(placeId);
     if (cid) return cid;
   }
-  if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    // Round to 4 decimals (±11 m) — enough for a landmark pin, keeps the URL
-    // ~45 chars so it never hits the console's truncation window.
-    return `https://www.google.com/maps/@${lat.toFixed(4)},${lon.toFixed(4)},17z`;
+  // 2. ASCII name search — a real place card for the named landmark.
+  const q = asciiSearchName(name);
+  if (q) {
+    const url = `https://maps.google.com/?q=${encodeURIComponent(q)}`;
+    // Truncation guard: longer URLs get cut by the console mid-encoding.
+    if (url.length <= 57) return url;
   }
-  // No coordinates at all — last resort name search (never happens today:
-  // every caller resolves the POI before linking).
-  if (clean) {
-    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(clean)}`;
+  // 3. Last resort: @-view at the coordinates (no name anywhere).
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    return `https://www.google.com/maps/@${lat.toFixed(4)},${lon.toFixed(4)},17z`;
   }
   return '';
 }
