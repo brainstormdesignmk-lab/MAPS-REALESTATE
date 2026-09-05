@@ -45,12 +45,19 @@ import * as fs from 'fs';
 
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
-const SUPABASE_URL = process.env.SUPABASE_URL ?? 'https://qkgioqotxjxffiaufgwd.supabase.co';
-const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
+/** env var or undefined — an EMPTY value ('' as written in some lina.env
+ *  files) must behave exactly like an unset var. */
+function env(k: string): string | undefined {
+  const v = process.env[k];
+  return v && v.trim() ? v : undefined;
+}
+
+const SUPABASE_URL = env('SUPABASE_URL') ?? 'https://qkgioqotxjxffiaufgwd.supabase.co';
+const SUPABASE_ANON_KEY = env('SUPABASE_ANON_KEY')
   ?? 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFrZ2lvcW90eGp4ZmZpYXVmZ3dkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUxMTU0NjUsImV4cCI6MjA3MDY5MTQ2NX0.WVno6c6_rvFqFwj1fN8UWHYmlit0C-6J_h57P8d5eOI';
 
-const LINA_DB = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'lina.db');
-const POIS_DB = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
+const LINA_DB = env('DB_PATH') ?? path.join(process.cwd(), 'data', 'lina.db');
+const POIS_DB = env('SKOPJE_POIS_DB') ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
 
 const once = process.argv.includes('--once');
 const intervalArg = process.argv.find(a => a.startsWith('--interval='));

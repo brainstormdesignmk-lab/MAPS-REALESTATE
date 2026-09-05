@@ -21,9 +21,16 @@ import * as dotenv from 'dotenv';
 // Load env from ~/.lina/lina.env (SUPABASE_URL/KEY, DB_PATH, SKOPJE_POIS_DB)
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
+/** env var or undefined — an EMPTY value ('' as written in some lina.env
+ *  files) must behave exactly like an unset var. */
+function env(k: string): string | undefined {
+  const v = process.env[k];
+  return v && v.trim() ? v : undefined;
+}
+
 const SKOPJE_BBOX = '(41.95,21.35,42.05,21.50)';
-const POIS_DB = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
-const LINA_DB = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'lina.db');
+const POIS_DB = env('SKOPJE_POIS_DB') ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
+const LINA_DB = env('DB_PATH') ?? path.join(process.cwd(), 'data', 'lina.db');
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -35,7 +42,7 @@ function log(msg: string) {
 // ── SerpApi keys ─────────────────────────────────────────────────────────────
 function loadSerpApiKeys(): string[] {
   const keys: string[] = [];
-  if (process.env.SERPAPI_KEY) keys.push(process.env.SERPAPI_KEY);
+  if (env('SERPAPI_KEY')) keys.push(env('SERPAPI_KEY')!);
   if (fs.existsSync('data/serpapi-key.txt')) {
     const k = fs.readFileSync('data/serpapi-key.txt', 'utf8').trim();
     if (k && !keys.includes(k)) keys.push(k);

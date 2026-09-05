@@ -16,8 +16,16 @@ import * as dotenv from 'dotenv';
 
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
-const POIS_DB = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
-const LINA_DB = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'lina.db');
+/** env var or undefined — an EMPTY value ('' as written in some lina.env
+ *  files) must behave exactly like an unset var, or the data-path fallbacks
+ *  below resolve to '' and every DB open fails. */
+function env(k: string): string | undefined {
+  const v = process.env[k];
+  return v && v.trim() ? v : undefined;
+}
+
+const POIS_DB = env('SKOPJE_POIS_DB') ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
+const LINA_DB = env('DB_PATH') ?? path.join(process.cwd(), 'data', 'lina.db');
 
 function log(msg: string): void {
   console.log(`[${new Date().toISOString()}] ${msg}`);

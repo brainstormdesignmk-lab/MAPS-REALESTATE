@@ -29,6 +29,13 @@ import * as fs from 'fs';
 // Load env from ~/.lina/lina.env
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
+/** env var or undefined — an EMPTY value ('' as written in some lina.env
+ *  files) must behave exactly like an unset var. */
+function env(k: string): string | undefined {
+  const v = process.env[k];
+  return v && v.trim() ? v : undefined;
+}
+
 const SKOPJE_BBOX = { latMin: 41.95, latMax: 42.05, lonMin: 21.35, lonMax: 21.50 };
 
 function insideBbox(lat: number, lon: number): boolean {
@@ -97,7 +104,7 @@ async function patchProperty(propertyNumber: string, data: {
 // ── SerpApi geocoder (Google Maps engine) ────────────────────────────────────
 function loadSerpApiKeys(): string[] {
   const keys: string[] = [];
-  if (process.env.SERPAPI_KEY) keys.push(process.env.SERPAPI_KEY);
+  if (env('SERPAPI_KEY')) keys.push(env('SERPAPI_KEY')!);
   if (fs.existsSync('data/serpapi-key.txt')) {
     const k = fs.readFileSync('data/serpapi-key.txt', 'utf8').trim();
     if (k && !keys.includes(k)) keys.push(k);
@@ -156,7 +163,7 @@ let offlineMap: any = null;
 async function initOfflineMap(): Promise<void> {
   try {
     const mod = await import('../src/geo/offlineMap');
-    const dbPath = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
+    const dbPath = env('SKOPJE_POIS_DB') ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
     offlineMap = new mod.OfflineMapStore(dbPath);
     if (!offlineMap.available) offlineMap = null;
   } catch {
