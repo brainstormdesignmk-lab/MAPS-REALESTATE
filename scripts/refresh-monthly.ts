@@ -246,11 +246,23 @@ async function phaseB(db: Database.Database): Promise<number> {
     }
   }
 
-  const queries = ['supermarket', 'pharmacy'];
+  // THE IDENTITY RULE (the 678-row sin, never again): SerpApi returns
+  // data_id (hex pair) + data_cid (decimal) on EVERY place in EVERY response.
+  // They are the place's ID card - the only thing that merges the two
+  // embassy spellings into ONE place, and the key that makes ?cid=
+  // place-card links work cluster-wide. Captured on EVERY row.
+  const queries = [
+    // 10 landmark categories - the institutional anchors people navigate by.
+    'supermarket', 'shopping mall', 'pharmacy', 'bank', 'school',
+    'hospital', 'embassy', 'hotel', 'museum', 'gas station',
+  ];
   let inserted = 0;
+  let identityBackfilled = 0;
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO pois (name, type, lat, lon, source) VALUES (?, ?, ?, ?, 'google')`
+    `INSERT OR IGNORE INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, 'google', ?)`
   );
+  const findByCid = db.prepare(`SELECT rowid FROM pois WHERE place_id = ?`);
+  const updateCoords = db.prepare(`UPDATE pois SET lat = ?, lon = ? WHERE rowid = ?`);
 
   for (const tile of tiles) {
     if (serpApiLeft < 20) {
@@ -274,13 +286,33 @@ async function phaseB(db: Database.Database): Promise<number> {
         const lon = r.gps_coordinates?.longitude;
         if (!lat || !lon) continue;
         const type = r.type ?? q;
-        const info = insert.run(name, type, lat, lon);
-        if (info.changes > 0) inserted++;
+        // IDENTITY: hex data_id stored verbatim; data_cid normalized to a
+        // hex pair when data_id is absent (cid = 0xHI:0xLO packed decimal).
+        let placeId: string | null = (r.data_id ?? null);
+        if (!placeId && r.data_cid) {
+          try {
+            const cid = BigInt(r.data_cid);
+            const hi = cid >> 32n & 0xffffffffn;
+            const lo = cid & 0xffffffffn;
+            placeId = `0x${hi.toString(16)}:0x${lo.toString(16)}`;
+          } catch { placeId = null; }
+        }
+        const info = insert.run(name, type, lat, lon, placeId);
+        if (info.changes > 0) {
+          inserted++;
+        } else if (placeId) {
+          // Row exists but may predate identity - backfill coords+id by place_id.
+          const existing = findByCid.get(placeId) as { rowid: number } | undefined;
+          if (existing) {
+            updateCoords.run(lat, lon, existing.rowid);
+            identityBackfilled++;
+          }
+        }
       }
     }
   }
 
-  log(`  Inserted ${inserted} new Google POIs (SerpApi left: ${serpApiLeft})`);
+  log(`  Inserted ${inserted} new Google POIs, identity backfilled ${identityBackfilled} (SerpApi left: ${serpApiLeft})`);
   return inserted;
 }
 
@@ -399,6 +431,20 @@ async function main() {
 
   const db = new Database(POIS_DB);
 
+  // SCHEMA SELF-UPGRADE (appliance rule: the script upgrades any DB it runs
+  // against - Lenovo, T60, T620, atom - never fails on an older file).
+  // osm_key: OSM identity ("node/123") - UNIQUE index makes phaseA's
+  // INSERT OR IGNORE actually dedupe across monthly runs. place_id: Google
+  // identity - indexed (non-unique: two spellings of one place share an id
+  // BY DESIGN; the query-time merge collapses them).
+  const cols = (db.prepare('PRAGMA table_info(pois)').all() as Array<{ name: string }>).map(c => c.name);
+  if (!cols.includes('osm_key')) db.exec('ALTER TABLE pois ADD COLUMN osm_key TEXT');
+  if (!cols.includes('place_id')) db.exec('ALTER TABLE pois ADD COLUMN place_id TEXT');
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pois_osm_key ON pois(osm_key) WHERE osm_key IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_pois_place_id ON pois(place_id) WHERE place_id IS NOT NULL;
+  `);
+
   const initialCount = (db.prepare('SELECT COUNT(*) as c FROM pois').get() as { c: number }).c;
   log(`Initial POI count: ${initialCount}\n`);
 
@@ -408,6 +454,10 @@ async function main() {
 
   // Phase B: SerpApi top-up
   const googleInserted = await phaseB(db);
+  console.log('');
+
+  // Phase B2: Identity propagation (OSM rows adopt Google anchors)
+  const healed = phaseB2(db);
   console.log('');
 
   // Phase C: Queue drain
@@ -427,6 +477,7 @@ async function main() {
   for (const s of bySource) log(`    ${s.source}: ${s.c}`);
   log(`  OSM inserted: ${osmInserted}`);
   log(`  Google inserted: ${googleInserted}`);
+  log(`  Identity-healed OSM rows: ${healed}`);
   log(`  Queue drained: ${queueDrained}`);
   log(`  Poison sweep downgraded: ${poisonDowngraded}`);
   log(`  SerpApi remaining: ${serpApiLeft}`);
