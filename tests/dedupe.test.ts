@@ -74,3 +74,36 @@ test('nearest POIs capped at limit, preference-ranked', () => {
   assert.equal(pois[2].name, 'Парк Градски');
   store.close();
 });
+test('same place_id merges ACROSS names and distances (embassy alias regression)', () => {
+  // Production regression: the embassy override inserted TWO rows — official
+  // Cyrillic name and feed alias — both with Google's verified place_id, ~84m
+  // apart. The old name-equality dedupe let both into the top-3, so a re-ask
+  // "rotated" to the identical place with the identical link.
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Амбасада на Црна Гора', type: 'embassy', lat: 41.9959869, lon: 21.418169, source: 'osm', place_id: '0x1354144841501047:0x71a2f884c5dc3050' },
+    { name: 'Црногорска Амбасада', type: 'embassy', lat: 41.99572, lon: 21.41723, source: 'osm', place_id: '0x1354144841501047:0x71a2f884c5dc3050' },
+    { name: 'Беверли Хилс', type: 'hotel', lat: 41.99369, lon: 21.41632, source: 'osm' },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99562, 21.41531, 600, 10);
+  const names = pois.map(p => p.name);
+  assert.equal(names.filter(n => /мбасад|рногорск/.test(n)).length, 1,
+    `embassy must occupy exactly ONE slot, got: ${JSON.stringify(names)}`);
+  assert.ok(names.includes('Беверли Хилс'), 'other landmarks must still appear');
+  store.close();
+});
+
+test('same place_id: google anchor wins even when OSM row is closer', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Стара Османска Банка', type: 'bank', lat: 41.99560, lon: 21.41510, source: 'osm', place_id: '0xabc:0x123' },
+    { name: 'Македонска Банка', type: 'bank', lat: 41.99600, lon: 21.41600, source: 'google', place_id: '0xabc:0x123' },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99565, 21.41520, 500, 10);
+  assert.equal(pois.length, 1, 'place_id pair must collapse to one row');
+  assert.equal(pois[0].name, 'Македонска Банка', 'Google row wins the anchor regardless of name');
+  assert.equal(pois[0].place_id, '0xabc:0x123');
+  store.close();
+});

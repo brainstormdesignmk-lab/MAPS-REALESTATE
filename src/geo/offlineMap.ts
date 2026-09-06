@@ -395,10 +395,16 @@ export class OfflineMapStore {
     // variants: "Kipper" vs "Kipper Market - Butel" are different branches
     // and must never merge). For a same-place pair within 30m, Google wins
     // the anchor (verified coordinates); the OSM row is dropped.
+    // Identity tier 1: same non-null place_id = THE SAME physical place no
+    // matter how the name is spelled (official vs feed alias) or how far the
+    // coordinates disagree — this is what keeps two spellings of one embassy
+    // from occupying two of the three rotation slots. No distance bound:
+    // place_id equality is stronger evidence than any coordinate.
     const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string; place_id?: string }> = [];
     for (const poi of ranked) {
       const dup = merged.find(g =>
-        Math.abs(g.dist - poi.dist) < 30 && normName(g.name) === normName(poi.name));
+        (!!poi.place_id && !!g.place_id && poi.place_id === g.place_id) ||
+        (Math.abs(g.dist - poi.dist) < 30 && normName(g.name) === normName(poi.name)));
       if (dup) {
         if (poi.source === 'google' && dup.source !== 'google') {
           // Google wins the anchor; replace the dup in place
@@ -983,7 +989,7 @@ function applyOverrides(db: Database.Database, file: string): number {
 
 export function writeMap(
   dbPath: string,
-  pois: Array<{ name: string; type: string; lat: number; lon: number; source?: string; place_url?: string }>,
+  pois: Array<{ name: string; type: string; lat: number; lon: number; source?: string; place_url?: string; place_id?: string }>,
   addresses: Array<{ street: string; housenumber: string; lat: number; lon: number }>,
 ): MapStats {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
@@ -1030,8 +1036,8 @@ export function writeMap(
     // Wrap ALL inserts in a single transaction — 10-100x faster than
     // auto-commit per row.
     const insertAll = db.transaction(() => {
-      const insPoi = db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_url) VALUES (?, ?, ?, ?, ?, ?)');
-      for (const p of pois) insPoi.run(p.name, p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null);
+      const insPoi = db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_url, place_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
+      for (const p of pois) insPoi.run(p.name, p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null, p.place_id ?? null);
       console.log(`[skopje-map] inserted ${pois.length} POIs`);
 
       const insAddr = db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key) VALUES (?, ?, ?, ?, ?)');

@@ -1,6 +1,6 @@
 {
   "name": "maps-realestate",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Standalone Skopje maps/geo stack — offline POI map build, Supabase backup data-hub, geo-watcher, monthly refresh. Redeployable to any machine with the maps role (T60 hub, T620 failover).",
   "engines": {
