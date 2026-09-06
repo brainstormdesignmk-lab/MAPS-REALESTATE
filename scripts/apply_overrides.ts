@@ -17,8 +17,8 @@ import Database from 'better-sqlite3';
 import { streetKey } from '../src/geo/offlineMap';
 
 interface OverrideFile {
-  pois?: Array<{ name: string; type: string; lat: number; lon: number; note?: string }>;
-  replaces?: Array<{ name: string; type: string; lat: number; lon: number; note?: string }>;
+  pois?: Array<{ name: string; type: string; lat: number; lon: number; place_id?: string; note?: string }>;
+  replaces?: Array<{ name: string; type: string; lat: number; lon: number; place_id?: string; note?: string }>;
   addresses?: Array<{ street: string; housenumber: string; lat: number; lon: number; note?: string }>;
   aliases?: Array<{ street: string; osmStreet: string; note?: string }>;
 }
@@ -27,6 +27,13 @@ function main() {
   const dbPath = process.env.SKOPJE_POIS_DB ?? 'data/skopje-pois.db';
   const ov: OverrideFile = JSON.parse(readFileSync('data/address-overrides.json', 'utf8'));
   const db = new Database(dbPath); // read-write
+  // Schema self-upgrade: pre-place_id DBs get the column here so this script
+  // can fill it. (The map build creates the column for fresh DBs.)
+  const cols = (db.prepare('PRAGMA table_info(pois)').all() as Array<{ name: string }>).map(c => c.name);
+  if (cols.length > 0 && !cols.includes('place_id')) {
+    db.exec('ALTER TABLE pois ADD COLUMN place_id TEXT');
+    console.log('~ schema: added pois.place_id column');
+  }
   let added = 0, skipped = 0;
 
   // --- POIs -------------------------------------------------------------
@@ -35,8 +42,8 @@ function main() {
       'SELECT COUNT(*) AS n FROM pois WHERE name = ? AND lat = ? AND lon = ?'
     ).get(p.name, p.lat, p.lon) as { n: number };
     if (exists.n > 0) { skipped++; continue; }
-    db.prepare('INSERT INTO pois (name, type, lat, lon) VALUES (?, ?, ?, ?)')
-      .run(p.name, p.type, p.lat, p.lon);
+    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(p.name, p.type, p.lat, p.lon, 'osm', p.place_id ?? null);
     console.log(`+ poi   ${p.name} [${p.type}] @ ${p.lat},${p.lon}`);
     added++;
   }
@@ -49,8 +56,8 @@ function main() {
       console.log(`~ replace ${r.name}: deleted ${del.changes} wrong entr${del.changes === 1 ? 'y' : 'ies'}`);
     }
     // Insert the corrected entry
-    db.prepare('INSERT INTO pois (name, type, lat, lon) VALUES (?, ?, ?, ?)')
-      .run(r.name, r.type, r.lat, r.lon);
+    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(r.name, r.type, r.lat, r.lon, 'osm', r.place_id ?? null);
     console.log(`+ poi   ${r.name} [${r.type}] @ ${r.lat},${r.lon} (corrected)`);
     added++;
   }

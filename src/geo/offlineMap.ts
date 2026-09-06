@@ -45,6 +45,10 @@ export interface LocalPoi {
    *  scripts/capture-place-urls.ts). When present, links should use it so the
    *  client's map opens the EXACT place card, not a bare coordinate view. */
   place_url?: string;
+  /** Google place_id (hex pair "0x…:0x…"). When present, landmarkLink emits
+   *  maps.google.com/?cid=<decimal> — the EXACT place card, immune to name
+   *  ambiguity. Populated from overrides and the monthly SerpApi top-up. */
+  place_id?: string;
 }
 
 export interface Center {
@@ -318,6 +322,22 @@ export class OfflineMapStore {
   constructor(dbPath: string) {
     try {
       this.db = new Database(dbPath, { readonly: true });
+      // Schema self-upgrade: DBs built before the place_id column (Google
+      // place-card links) must still open — new column reads as NULL and the
+      // overrides fill it on the next apply/build. readonly connections can
+      // still PRAGMA table_info; only the ALTER would fail, and a NULL
+      // place_id is handled gracefully everywhere (link falls to next tier).
+      const cols = (this.db.prepare("PRAGMA table_info(pois)").all() as Array<{ name: string }>)
+        .map(c => c.name);
+      if (!cols.includes('place_id')) {
+        try {
+          this.db.close();
+          const rw = new Database(dbPath); // read-write for the migration
+          rw.exec('ALTER TABLE pois ADD COLUMN place_id TEXT');
+          rw.close();
+          this.db = new Database(dbPath, { readonly: true });
+        } catch { /* read-only FS or concurrent writer — place_id stays absent */ }
+      }
       // Validate the schema — an empty/foreign file must not masquerade as a map.
       this.db.prepare('SELECT COUNT(*) FROM pois').get();
     } catch {
@@ -351,7 +371,7 @@ export class OfflineMapStore {
       WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?
     `).all(lat - radiusM / 111000, lat + radiusM / 111000,
            lon - radiusM / 82000,  lon + radiusM / 82000) as Array<{
-      name: string; type: string; lat: number; lon: number; source?: string; place_url?: string;
+      name: string; type: string; lat: number; lon: number; source?: string; place_url?: string; place_id?: string;
     }>;
 
     const inCircle = rows
@@ -375,7 +395,7 @@ export class OfflineMapStore {
     // variants: "Kipper" vs "Kipper Market - Butel" are different branches
     // and must never merge). For a same-place pair within 30m, Google wins
     // the anchor (verified coordinates); the OSM row is dropped.
-    const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string }> = [];
+    const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string; place_id?: string }> = [];
     for (const poi of ranked) {
       const dup = merged.find(g =>
         Math.abs(g.dist - poi.dist) < 30 && normName(g.name) === normName(poi.name));
@@ -395,16 +415,17 @@ export class OfflineMapStore {
       lat: p.lat,
       lon: p.lon,
       place_url: p.place_url,
+      place_id: p.place_id,
     }));
   }
 
   /** Fuzzy POI name search — LIKE %name% against the pois table, sorted by
    *  real haversine distance from center. Returns candidates within 900m. */
-  findPoisLike(name: string, center: Center): Array<{ name: string; lat: number; lon: number; dist: number; place_url?: string }> {
+  findPoisLike(name: string, center: Center): Array<{ name: string; lat: number; lon: number; dist: number; place_url?: string; place_id?: string }> {
     if (!this.db || !name) return [];
     const rows = this.db.prepare(
-      `SELECT name, lat, lon, place_url FROM pois WHERE name LIKE ? COLLATE NOCASE`
-    ).all(`%${name}%`) as Array<{ name: string; lat: number; lon: number; place_url?: string }>;
+      `SELECT name, lat, lon, place_url, place_id FROM pois WHERE name LIKE ? COLLATE NOCASE`
+    ).all(`%${name}%`) as Array<{ name: string; lat: number; lon: number; place_url?: string; place_id?: string }>;
     return rows
       .map(r => ({ ...r, dist: distM(center.lat, center.lon, r.lat, r.lon) }))
       .filter(r => r.dist <= 900)
@@ -609,7 +630,7 @@ export class OfflineMapStore {
   /** Search POIs by name — for landmark-style addresses like "Кај Бранка"
    *  or "Палома Бјанка" where the address IS the landmark, not a street.
    *  Returns the best match (exact > starts-with > contains). */
-  findPoiByName(name: string): { lat: number; lon: number; name: string; place_url?: string } | undefined {
+  findPoiByName(name: string): { lat: number; lon: number; name: string; place_url?: string; place_id?: string } | undefined {
     if (!this.db || !name) return undefined;
     // Strip location prepositions AND feed typos of them ("как" for "кај").
     const clean = name.replace(/^(?:кај|спроти|как|кај штипски|кај скопски)\s+/i, '').trim();
@@ -621,8 +642,8 @@ export class OfflineMapStore {
     // JS where toLowerCase() is Unicode-aware. Table is ~4k rows — trivial.
     const needle = clean.toLowerCase();
     let rows = (this.db.prepare(
-      'SELECT name, type, lat, lon, place_url FROM pois'
-    ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string }>)
+      'SELECT name, type, lat, lon, place_url, place_id FROM pois'
+    ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string }>)
       .filter(r => r.name.toLowerCase().includes(needle));
     // Progressive shortening: "Сити Мол ' Руските Згради" → "Сити Мол"
     // (head) and "Шампионче Как Кипер Маркет" → "кипер маркет" (tail).
@@ -646,7 +667,7 @@ export class OfflineMapStore {
       const best = rows[0];
       try { fs.appendFileSync('/tmp/landmark-debug.log',
         `[${new Date().toISOString()}] findPoiByName(${clean}): ${rows.length} matches → ${best.name} (${best.name.length} chars)\n`); } catch {}
-      return { lat: best.lat, lon: best.lon, name: best.name, place_url: best.place_url ?? undefined };
+      return { lat: best.lat, lon: best.lon, name: best.name, place_url: best.place_url ?? undefined, place_id: best.place_id ?? undefined };
     }
     return undefined;
   }
@@ -885,6 +906,7 @@ interface OverrideRow {
   name?: string;
   type?: string;
   lat?: number;
+  place_id?: string;
   lon?: number;
   street?: string;
   housenumber?: string;
@@ -913,8 +935,8 @@ function applyOverrides(db: Database.Database, file: string): number {
     const n = (db.prepare('SELECT COUNT(*) AS n FROM pois WHERE name = ? AND lat = ? AND lon = ?')
       .get(p.name, p.lat, p.lon) as { n: number }).n;
     if (n > 0) continue;
-    db.prepare('INSERT INTO pois (name, type, lat, lon, source) VALUES (?, ?, ?, ?, ?)')
-      .run(p.name, p.type, p.lat, p.lon, 'osm');
+    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(p.name, p.type, p.lat, p.lon, 'osm', p.place_id ?? null);
     added++;
   }
 
@@ -922,8 +944,8 @@ function applyOverrides(db: Database.Database, file: string): number {
   for (const r of ov.replaces ?? []) {
     if (!r.name || !r.type || !Number.isFinite(r.lat ?? NaN) || !Number.isFinite(r.lon ?? NaN)) continue;
     const del = db.prepare('DELETE FROM pois WHERE name = ?').run(r.name);
-    db.prepare('INSERT INTO pois (name, type, lat, lon, source) VALUES (?, ?, ?, ?, ?)')
-      .run(r.name, r.type, r.lat, r.lon, 'osm');
+    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(r.name, r.type, r.lat, r.lon, 'osm', r.place_id ?? null);
     added += del.changes + 1;
   }
 
@@ -991,7 +1013,8 @@ export function writeMap(
         lat  REAL NOT NULL,
         lon  REAL NOT NULL,
         source TEXT NOT NULL DEFAULT 'osm',
-        place_url TEXT
+        place_url TEXT,
+        place_id TEXT
       );
       CREATE INDEX idx_pois_lat ON pois(lat);
       CREATE TABLE addresses (

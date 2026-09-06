@@ -293,7 +293,7 @@ export class LandmarkService {
   /** Public passthrough: resolve a place name against the offline POI table
    *  ("kade e toa Helen Doron?"). Undefined when the map is unavailable or
    *  nothing matches. */
-  findPlace(name: string): { name: string; lat: number; lon: number; place_url?: string } | undefined {
+  findPlace(name: string): { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined {
     if (!this.opts.offlineMap?.available) return undefined;
     return this.opts.offlineMap.findPoiByName(name);
   }
@@ -459,7 +459,7 @@ export class LandmarkService {
    *  request path). If the center is untrusted, pushes to the re-resolve
    *  queue and returns empty — the handler serves an honest fallback.
    *  Client-facing claims are capped at 500m. */
-  nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; place_url?: string }> {
+  nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
     const center = resolveSearchCenter(p);
 
     if (!center.trusted) {
@@ -474,7 +474,7 @@ export class LandmarkService {
     }
 
     // Adaptive widening — POI search; client-facing claims capped at 500m
-    let found: Array<{ name: string; distance_m: number; lat: number; lon: number; place_url?: string }> = [];
+    let found: Array<{ name: string; distance_m: number; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
     if (this.opts.offlineMap?.available) {
       for (const radius of [150, 300, 600, 900]) {
         const pois = this.opts.offlineMap.nearestPois(center.lat, center.lon, radius, 50);
@@ -482,7 +482,7 @@ export class LandmarkService {
           found = pois
             .filter(poi => poi.distance_m <= 500 && poi.lat != null && poi.lon != null)
             .slice(0, 3)
-            .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined }));
+            .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
           break;
         }
       }
@@ -503,6 +503,6 @@ export class LandmarkService {
         `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-EMPTY no POIs within 500m → queue\n`); } catch {}
     }
 
-    return found.map(f => ({ landmark: f.name, lat: f.lat, lon: f.lon, place_url: f.place_url }));
+    return found.map(f => ({ landmark: f.name, lat: f.lat, lon: f.lon, place_url: f.place_url, place_id: f.place_id }));
   }
 }

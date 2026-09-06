@@ -15,7 +15,6 @@
     "              of 'osmStreet' is duplicated under the key of 'street'",
     "              so geocodeAddress() matches"
   ],
-
   "pois": [
     {
       "name": "KAM Market",
@@ -23,13 +22,6 @@
       "lat": 41.9936885,
       "lon": 21.4150622,
       "note": "Kapishtec — same building as EB 78; missing from OSM import"
-    },
-    {
-      "name": "Црногорска Амбасада",
-      "type": "embassy",
-      "lat": 41.9957176,
-      "lon": 21.4172255,
-      "note": "EB 63 feed says 'Црногорска Амбасада'; OSM POI is 'Амбасада на Црна Гора' (word-order mismatch defeats LIKE lookup)"
     },
     {
       "name": "Сити Мол",
@@ -49,7 +41,7 @@
       "name": "ТЦ Олимпико",
       "type": "mall",
       "lat": 42.0005215,
-      "lon": 21.3918700,
+      "lon": 21.39187,
       "note": "EB 62 Тафталиџе — real mall at Лондонска 19 / Митр. Теодосиј Гологанов 149; absent from OSM import entirely"
     },
     {
@@ -60,7 +52,6 @@
       "note": "EB 87 — school at Бул. Февруарски Поход 95 (Аеродром); present in OSM as way 179481461 but missed by our import"
     }
   ],
-
   "addresses": [
     {
       "street": "Васил Стефановски",
@@ -77,17 +68,31 @@
       "note": "EB 55 Влае 2 — street exists in OSM (way 32301887) but no numbered buildings mapped; coords are the way's center"
     }
   ],
-
   "replaces": [
     {
-      "name": "\u0410\u043c\u0431\u0430\u0441\u0430\u0434\u0430 \u043d\u0430 \u0423\u043a\u0440\u0430\u0438\u043d\u0430",
+      "name": "Амбасада на Украина",
       "type": "diplomatic",
       "lat": 41.9981294,
       "lon": 21.4254355,
       "note": "OSM has phantom entry at 41.989,21.417 (near Vladimir Nazor) — 1.2km from real embassy at Albert Švajcer 7-9"
+    },
+    {
+      "name": "Амбасада на Црна Гора",
+      "type": "diplomatic",
+      "lat": 41.9959869,
+      "lon": 21.418169,
+      "place_id": "0x1354144841501047:0x71a2f884c5dc3050",
+      "note": "Google place data (maps.app.goo.gl/4jkzq2pzskwDyWvT9): Embassy of Montenegro, Vasil Stefanovski 7. OSM row was ~84m off. place_id enables the ?cid= place-card link."
+    },
+    {
+      "name": "Црногорска Амбасада",
+      "type": "embassy",
+      "lat": 41.9959869,
+      "lon": 21.418169,
+      "place_id": "0x1354144841501047:0x71a2f884c5dc3050",
+      "note": "EB 63 feed spelling (alias of Амбасада на Црна Гора); coords+place_id = Google place data (Embassy of Montenegro, Vasil Stefanovski 7)."
     }
   ],
-
   "aliases": [
     {
       "street": "Ефтим Спространов",
