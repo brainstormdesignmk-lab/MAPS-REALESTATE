@@ -80,16 +80,17 @@ export function fullCoordsLink(lat: number, lon: number): string {
 //      script) — emitted verbatim, original Google.
 //   2. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
 //      Google's own domain, ~49 chars (truncation-proof, verified in browser).
-//   3. ASCII name search via maps.google.com/?q=<latin name> — original Google,
-//      opens the NAMED landmark (a place card, not a bare view). Cyrillic is
-//      transliterated with the same canonical table the offline map uses; the
-//      URL is length-guarded at 57 chars because the console that renders
-//      Lina's replies cuts long URLs mid-encoding.
-//   4. @-view at the POI coordinates — ONLY when no usable name exists (the
-//      user rejected bare-coordinate views: they open a map with no landmark).
+//   3. Coordinate pin via maps.google.com/?q=lat,lon (~44 chars) — ALWAYS drops
+//      a red pin on the exact spot. Name searches are BANNED: with no city
+//      context Google biases them by the viewport/keywords and can return a
+//      results LIST at country zoom instead of a pin (production bug: a
+//      "crna gora" embassy name-search opened a Montenegro-wide list). The
+//      landmark's NAME is carried in the reply text, never in the URL.
 // Never: tinyurl (third-party shortener — agency refuses it), never
-// percent-encoded Cyrillic name searches, never bare query=lat,lon.
+// percent-encoded Cyrillic name searches, never a name-only ?q=<name> search,
+// never a bare @-view (opens a map with no landmark).
 export function landmarkLink(name: string, placeId: string | null, lat: number, lon: number, placeUrl?: string): string {
+  void name; // name lives in the reply text, not in the URL
   // BEST: a stored ORIGINAL Google URL (canonical place URL captured by
   // scripts/capture-place-urls.ts). Only google.com/maps links are accepted —
   // tinyurl/other shorteners are never emitted.
@@ -101,16 +102,9 @@ export function landmarkLink(name: string, placeId: string | null, lat: number, 
     const cid = cidLink(placeId);
     if (cid) return cid;
   }
-  // 2. ASCII name search — a real place card for the named landmark.
-  const q = asciiSearchName(name);
-  if (q) {
-    const url = `https://maps.google.com/?q=${encodeURIComponent(q)}`;
-    // Truncation guard: longer URLs get cut by the console mid-encoding.
-    if (url.length <= 57) return url;
-  }
-  // 3. Last resort: @-view at the coordinates (no name anywhere).
+  // 2. Coordinate pin — deterministic, unambiguous, always a red pin.
   if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    return `https://www.google.com/maps/@${lat.toFixed(4)},${lon.toFixed(4)},17z`;
+    return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
   }
   return '';
 }
