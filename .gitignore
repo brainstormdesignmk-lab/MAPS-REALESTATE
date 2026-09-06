@@ -7,3 +7,4 @@ data/*.db-shm
 data/*.db-wal
 data/*.db.bak*
 .env
+GOOGLEMAPS_API_KEY.txt
