@@ -457,10 +457,16 @@ export class OfflineMapStore {
 
     // Junk types (taxonomy dirt from the Overpass/Google merge) are never
     // usable as landmarks — filter BEFORE ranking so a "yes" building can't
-    // outrank a real anchor.
-    const JUNK_TYPES = new Set(['yes', 'place', 'residential', 'company', '',
+    // outrank a real anchor. NOTE: 'residential' (bare OSM landuse tag on
+    // apartment complexes) is NOT junk when it names a known complex —
+    // Беверли Хилс is typed exactly that and is THE landmark of its block.
+    // Only unnamed residential rows are junk; named ones rank like a
+    // neighborhood anchor (0 → still distance-eligible, never dropped).
+    const JUNK_TYPES = new Set(['yes', 'place', 'company', '',
       'house', 'building', 'address', 'unknown']);
-    const clean = inCircle.filter(r => !JUNK_TYPES.has(normType(r.type)));
+    const clean = inCircle.filter(r =>
+      !JUNK_TYPES.has(normType(r.type)) ||
+      (normType(r.type) === 'residential' && !!r.name && r.name.trim().length > 0));
 
     // Institutional landmark first, then distance. This replaces the
     // pure-distance sort: a mall at 200m outranks a cafe at 50m — people say

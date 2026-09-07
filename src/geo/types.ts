@@ -28,7 +28,20 @@ export const LANDMARK_PREFERENCE: Record<string, number> = {
   hotel: 2, cafe: 1, restaurant: 1,
 };
 
-/** Rank of a raw POI type (normalized first). Unknown/empty → 0. */
+/** Rank of a raw POI type (normalized first). Unknown/empty → 0.
+ *  Multi-word Google types normalize BEFORE lookup: "Shopping mall" →
+ *  "shopping mall" → mall rank (5). Without this, the largest shopping
+ *  center of a neighborhood (Beverly Hills) ranked 0 and lost to every
+ *  bank/pharmacy — fixed by canonicalizing the compound forms. */
+const TYPE_ALIASES: Record<string, string> = {
+  'shopping mall': 'mall',
+  'shopping centre': 'mall',
+  'shopping center': 'mall',
+  'shopping center complex': 'mall',
+  'trade center': 'mall',
+  'city district': 'subdistrict',
+};
 export function typeRank(type: string | null | undefined): number {
-  return LANDMARK_PREFERENCE[normType(type)] ?? 0;
+  const t = normType(type);
+  return LANDMARK_PREFERENCE[TYPE_ALIASES[t] ?? t] ?? 0;
 }

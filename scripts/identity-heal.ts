@@ -60,8 +60,9 @@ const COUNTRIES = new Set([
 
 /** Countries, in their Macedonian-name forms, mapped to the canonical token
  *  both languages normalize to via the lexicon. Extracted from a name by
- *  checking its semantic key against known country tokens. */
-function countriesIn(s: string): Set<string> {
+ *  checking its semantic key against known country tokens. Exported for the
+ *  strip pass, which must accept the same tier-3 evidence as this heal. */
+export function countriesIn(s: string): Set<string> {
   const key = semanticNameKey(s);
   const words = new Set(key.split(/\s+/));
   const found = new Set<string>();
@@ -89,7 +90,7 @@ function countriesIn(s: string): Set<string> {
 
 /** True when a and b name contradictory countries (both have country words,
  *  and the sets are disjoint). Never true when either side names none. */
-function countryContradiction(nameA: string, nameB: string): boolean {
+export function countryContradiction(nameA: string, nameB: string): boolean {
   const a = countriesIn(nameA);
   const b = countriesIn(nameB);
   if (!a.size || !b.size) return false;

@@ -36,7 +36,6 @@ test('LANDMARK_PREFERENCE has the canonical keys', () => {
 test('junk types never appear in nearestPois output', () => {
   const dbPath = tmpDb();
   writeMap(dbPath, [
-    { name: 'Зграда А', type: 'residential', lat: 41.9970, lon: 21.4300 },
     { name: 'Нешто', type: 'yes', lat: 41.9971, lon: 21.4301 },
     { name: 'Фирма ДОО', type: 'company', lat: 41.9972, lon: 21.4302 },
     { name: 'Парк', type: 'park', lat: 41.9973, lon: 21.4303 },
@@ -47,9 +46,22 @@ test('junk types never appear in nearestPois output', () => {
   const pois = store.nearestPois(41.9970, 21.4300, 500, 10);
   const names = pois.map(p => p.name);
   assert.ok(names.includes('Парк'), `expected Парк in ${names}`);
-  for (const junk of ['Зграда А', 'Нешто', 'Фирма ДОО', 'Месна Заедница', 'Куќа']) {
+  for (const junk of ['Нешто', 'Фирма ДОО', 'Месна Заедница', 'Куќа']) {
     assert.ok(!names.includes(junk), `junk type leaked: ${junk} in ${names}`);
   }
+  store.close();
+});
+
+test('a NAMED residential complex survives the junk filter (Beverly Hills class)', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Беверли Хилс', type: 'residential', lat: 41.9970, lon: 21.4300 },
+    { name: 'Кафе', type: 'cafe', lat: 41.9971, lon: 21.4301 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.9970, 21.4300, 500, 10);
+  const names = pois.map(p => p.name);
+  assert.ok(names.includes('Беверли Хилс'), `named residential must survive: ${names}`);
   store.close();
 });
 

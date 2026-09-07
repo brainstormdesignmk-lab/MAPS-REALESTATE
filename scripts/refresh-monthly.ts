@@ -19,6 +19,7 @@ import * as os from 'os';
 import * as dotenv from 'dotenv';
 import { distM } from '../src/geo/precision';
 import { identityHeal } from './identity-heal';
+import { stripBlindFusions } from './strip-blind-fusions';
 
 // Load env from ~/.lina/lina.env (SUPABASE_URL/KEY, DB_PATH, SKOPJE_POIS_DB)
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
@@ -321,6 +322,10 @@ async function phaseB(db: Database.Database): Promise<number> {
 // ── PHASE B2: Identity propagation — implemented in scripts/identity-heal.ts
 // (bilingual tiers + country-contradiction guard + embassy uniqueness).
 export function phaseB2(db: Database.Database): number {
+  // Order matters: strip FIRST (blind coordinate fusions from the early
+  // pre-guard healing lose their stolen identities), THEN heal — stripped
+  // rows re-enter the guarded pass and can find their TRUE anchors by name.
+  stripBlindFusions(db);
   return identityHeal(db).healed;
 }
 
