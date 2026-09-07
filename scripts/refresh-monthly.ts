@@ -17,6 +17,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as dotenv from 'dotenv';
+import { distM } from '../src/geo/precision';
+import { identityHeal } from './identity-heal';
 
 // Load env from ~/.lina/lina.env (SUPABASE_URL/KEY, DB_PATH, SKOPJE_POIS_DB)
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
@@ -314,6 +316,12 @@ async function phaseB(db: Database.Database): Promise<number> {
 
   log(`  Inserted ${inserted} new Google POIs, identity backfilled ${identityBackfilled} (SerpApi left: ${serpApiLeft})`);
   return inserted;
+}
+
+// ── PHASE B2: Identity propagation — implemented in scripts/identity-heal.ts
+// (bilingual tiers + country-contradiction guard + embassy uniqueness).
+export function phaseB2(db: Database.Database): number {
+  return identityHeal(db).healed;
 }
 
 // ── PHASE C: Queue drain ─────────────────────────────────────────────────────

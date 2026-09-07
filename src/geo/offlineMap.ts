@@ -173,6 +173,83 @@ export function normName(s: string): string {
   return translitToLatin(s).replace(/[^a-z0-9]/g, '');
 }
 
+/**
+ * SEMANTIC name key — bridges TRANSLATED landmark names (Cyrillic ↔ English),
+ * which transliteration alone can never match:
+ *   "Амбасада на Црна Гора" → "embassy montenegro"
+ *   "Embassy of Montenegro" → "embassy montenegro"   ✅ SAME KEY
+ * Built from a small lexicon of institution words + Balkan geographic names
+ * (the vocabulary Skopje landmarks actually use). Stopwords (на/of) stripped.
+ * Deliberately conservative: words NOT in the lexicon pass through untouched,
+ * so ordinary brand names ("Kipper", "Tinex") are never mangled.
+ */
+const LEXICON_PHRASES: Array<[string, string]> = [
+  ['crna gora', 'montenegro'],
+  ['sjeverna makedonija', 'macedonia'],
+  ['makedonija', 'macedonia'],
+];
+const LEXICON_WORDS: Record<string, string> = {
+  ambasada: 'embassy', ambasadi: 'embassy', ambasy: 'embassy',
+  banka: 'bank', banki: 'bank',
+  uciliste: 'school', ucilista: 'school', gimnazija: 'school', gimnazii: 'school',
+  bolnica: 'hospital', bolnici: 'hospital', klinika: 'clinic',
+  park: 'park', parkot: 'park', gradina: 'garden',
+  crkva: 'church', crkvi: 'church', manastir: 'monastery', dzamija: 'mosque',
+  katedrala: 'cathedral', crkven: 'church',
+  muzej: 'museum', muzei: 'museum', teatar: 'theatre', pozoriste: 'theatre',
+  stadion: 'stadium', arena: 'stadium',
+  mol: 'mall', trgovski: 'shopping', market: 'market', pazara: 'market', pazar: 'market',
+  apoteka: 'pharmacy', apoteki: 'pharmacy',
+  hotel: 'hotel', hoteli: 'hotel', motel: 'motel',
+  univerzitet: 'university', fakultet: 'university',
+  opstina: 'municipality', policija: 'police', posta: 'post',
+  sobranie: 'assembly', skopski: 'skopje',
+  srbija: 'serbia', bugarija: 'bulgaria', grcija: 'greece', albaniia: 'albania',
+  albanija: 'albania', germanija: 'germany', francija: 'france', italija: 'italy',
+  turcija: 'turkey', amerika: 'america',
+  // Country names, Macedonian → English canonical (embassies, hotels, banks):
+  // without these, 'Чешка' vs 'Czech' looks like DIFFERENT countries and the
+  // identity guard wrongly separates one place into two.
+  rusija: 'russia', spanija: 'spain', cheshka: 'czech', slovenija: 'slovenia',
+  avstrija: 'austria', madjarska: 'hungary', madarska: 'hungary',
+  svicarska: 'switzerland', svajcarska: 'switzerland', kazahstan: 'kazakhstan',
+  bosna: 'bosnia', hercegovina: 'herzegovina', poljska: 'poland',
+  ukrajina: 'ukraine', kina: 'china', katar: 'qatar', iran: 'iran',
+  britanska: 'british', crnogorska: 'montenegro', slovachka: 'slovakia',
+  holandija: 'netherlands', romania: 'romania', ungary: 'hungary',
+  // Adjective forms → same canonical country ("Dutch Embassy" =
+  // "Амбасада на Холандија" — without these the identity guard sees
+  // two different countries and wrongly separates one place in two).
+  dutch: 'netherlands', swedish: 'sweden', japanese: 'japan',
+  hungarian: 'hungary', austrian: 'austria', chinese: 'china',
+  ukrainian: 'ukraine', polish: 'poland', romanian: 'romania',
+  russian: 'russia', croatian: 'croatia', german: 'germany',
+  spanish: 'spain', turkish: 'turkey', italian: 'italy', greek: 'greece',
+  bulgarian: 'bulgaria', serbian: 'serbia', slovak: 'slovakia',
+  kingdom: 'british',
+  // Common transliteration drift (Cyrillic ИЛИ→ILI, etc.)
+  beverli: 'beverly', hils: 'hills',
+};
+const STOPWORDS = new Set(['na', 'vo', 'od', 'do', 'kaj', 'sproti', 'of', 'the', 'in', 'at', 'de']);
+export function semanticNameKey(s: string): string {
+  let t = translitToLatin(s)
+    .replace(/[^a-z\s]/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+  for (const [from, to] of LEXICON_PHRASES) t = t.split(from).join(to);
+  const out = t.split(' ').map(w => LEXICON_WORDS[w] ?? w).filter(w => w && !STOPWORDS.has(w));
+  return out.join(' ');
+}
+/** Merge keys for a landmark name: exact translit + semantic. Two names are
+ *  the same place for merge purposes when ANY key matches. */
+export function nameMergeKeys(s: string): string[] {
+  const sem = semanticNameKey(s);
+  const keys = [normName(s)];
+  // Only add the semantic key when it differs AND is substantial — a bare
+  // "embassy" or "park" must not merge every embassy/park in the city.
+  if (sem.length >= 8 && sem !== keys[0]) keys.push(sem.replace(/\s+/g, ' ').trim());
+  return keys;
+}
+
 /** First house-number token in a raw address line.
  *  "Јане Сандански 25 - 17" → "25", "Бр.134" → "134", "ул. Македонија" → "".
  *  Shared by geocodeAddress() and resolvePropertyOffline(). */
