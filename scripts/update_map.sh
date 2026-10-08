@@ -26,8 +26,8 @@ echo "=== [3/4] Re-applying manual overrides ==="
 npx tsx scripts/apply_overrides.ts
 
 echo ""
-echo "=== [4/4] Healthcheck (POI counts by source, cache tiers, queue) ==="
-npx tsx scripts/healthcheck.ts
+echo "=== [4/4] Auditing feed address coverage ==="
+npx tsx scripts/audit_addresses.ts
 
 echo ""
-echo "DONE. Ship the map with: scripts/deploy_map.sh user@host /path/to/bot"
+echo "DONE. Remember to copy data/skopje-pois.db to production and restart the TUI."

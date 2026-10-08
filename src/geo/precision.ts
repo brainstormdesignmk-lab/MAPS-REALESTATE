@@ -72,7 +72,11 @@ export function propertyAreaLink(lat: number, lon: number): string {
 // Full precision — staff/internal, and the coordinate fallback. 17z = street
 // level, centered exactly on the point.
 export function fullCoordsLink(lat: number, lon: number): string {
-  return `https://www.google.com/maps/@${lat.toFixed(5)},${lon.toFixed(5)},17z`;
+  // ?q=lat,lng DROPS A PIN at the exact point. The @lat,lng,zoom form only
+  // CENTERS the viewport — the client reported "NO PIN ON THE MAP" for the
+  // visit-day link. q= also snaps the pin label to Google's own knowledge of
+  // the nearest address, matching the written address line in the message.
+  return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
 }
 
 // Landmark link — priority order:

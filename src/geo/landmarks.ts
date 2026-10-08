@@ -67,15 +67,20 @@ export interface PropertyRow {
   address?: string;
   lat?: number | null;
   lon?: number | null;
+  /** Feed description text — present only when callers pass the full
+   *  property (whereIsReply does); enables the feed landmark-pair top-up. */
+  details?: string | null;
 }
 
 export function centerTrusted(geoSource: string | null | undefined): boolean {
   // Trusted: real geocodes (stored / google_cached) AND the Phase-1 offline
   // import resolutions (osm_building exact / osm_interpolated between two
-  // neighbours). Untrusted: osm_low_confidence (street centroid, endpoint
-  // clamp, name-fail) — never anchors a landmark claim.
+  // neighbours / osm_street_anchor — a Google-verified street anchor taught
+  // to the map by the self-learning loop). Untrusted: osm_low_confidence
+  // (street centroid, endpoint clamp, name-fail) — never anchors a claim.
   return geoSource === 'stored' || geoSource === 'google_cached'
-    || geoSource === 'osm_building' || geoSource === 'osm_interpolated';
+    || geoSource === 'osm_building' || geoSource === 'osm_interpolated'
+    || geoSource === 'osm_street_anchor';
 }
 
 // Can the CACHED landmark be served to a client right now?
@@ -211,27 +216,69 @@ export function extractDetailsLandmark(
   center?: Center,
   offlineMap?: OfflineMapStore,
 ): DetailsLandmark | null {
-  if (!details || details.length < 10) return null;
-  const m = details.match(NEAR_RE);
-  if (!m) return null;
-  let name = m[1].trim().replace(/[.,]$/, '');
-  // Strip trailing junk: quotes, parens
-  name = name.replace(/[{}`\[\]()"„‟«»'']+$/g, '').trim();
-  // Remove leading articles: "на" etc.
-  name = name.replace(/^на\s+/i, '').trim();
-  if (name.length < 3 || name.length > 60) return null;
-  // Reject time expressions
-  if (/пред\s+\d|\bмесец|\bден|\bгодин|\bнедел|januar|februar|mart|april|maj|juni|juli|avgust|septembar|oktombar|noembar|deke(mbar|c)/iu.test(name)) return null;
+  const hits = extractDetailsLandmarks(details, center, offlineMap, 1);
+  return hits[0] ?? null;
+}
 
-  // Validate against merged POI table — local, free, fuzzy
-  if (center && offlineMap?.available) {
-    const pois = offlineMap.findPoisLike(name, center);
-    if (pois.length > 0) {
-      return { name: pois[0].name, lat: pois[0].lat, lon: pois[0].lon, place_url: pois[0].place_url ?? undefined };
+/**
+ * FEED LANDMARK PAIRS (the doc's zero-cost add): the feed's own description
+ * language is a CHAIN of anchors — "во потегот меѓу X и Y", "спроти X, до Y".
+ * Every distinct anchor after the first is a second VERIFIED reference for
+ * the same property; the rotation uses the full list instead of repeating
+ * one anchor three times. Order: as written in the description (humans list
+ * the nearest first). Returns up to `max` distinct, validated anchors.
+ */
+export function extractDetailsLandmarks(
+  details: string | undefined,
+  center?: Center,
+  offlineMap?: OfflineMapStore,
+  max = 3,
+): DetailsLandmark[] {
+  if (!details || details.length < 10 || max <= 0) return [];
+  // All anchor mentions, in written order — the ПОТЕГ chain: "меѓу X и Y",
+  // "спроти X", "кај Y", "во близина на Z".
+  const CHAIN_RE = /(?:спроти|кај|близина на|до|во близина на|меѓу)\s+([\p{L}][\p{L} .'-]{2,40})/giu;
+  const out: DetailsLandmark[] = [];
+  const seen = new Set<string>();
+  for (const m of details.matchAll(CHAIN_RE)) {
+    if (out.length >= max) break;
+    let blob = m[1].trim().replace(/[.,]$/, '');
+    // Strip trailing junk: quotes, parens
+    blob = blob.replace(/[{}`\[\]()"„‟«»'']+$/g, '').trim();
+    // Remove leading articles: "на" etc.
+    blob = blob.replace(/^на\s+/i, '').trim();
+    if (blob.length < 3 || blob.length > 60) continue;
+    // THE PAIR RULE (the doc's headline zero-cost add): the feed's signature
+    // phrase is "во потегот меѓу X и Y" — TWO anchors in one captured span.
+    // Split on the conjunction when both sides look like place names, so a
+    // pair yields two verified references instead of one unfindable blob.
+    const parts = blob.split(/\s+и\s+/).map(s => s.trim()).filter(s => s.length >= 3);
+    const candidates = parts.length >= 2 ? parts : [blob];
+    for (const name of candidates) {
+      if (out.length >= max) break;
+    if (name.length < 3 || name.length > 60) continue;
+    // Reject time expressions
+    if (/пред\s+\d|\bмесец|\bден|\bгодин|\bнедел|januar|februar|mart|april|maj|juni|juli|avgust|septembar|oktombar|noembar|deke(mbar|c)/iu.test(name)) continue;
+    // STREET GUARD (the privacy contract): a street name would leak the
+    // exact location — skip it in every layer.
+    if (isStreetName(name)) continue;
+
+    // Validate against merged POI table — local, free, fuzzy
+    let hit: DetailsLandmark | null = null;
+    if (center && offlineMap?.available) {
+      const pois = offlineMap.findPoisLike(name, center);
+      if (pois.length > 0) {
+        hit = { name: pois[0].name, lat: pois[0].lat, lon: pois[0].lon, place_url: pois[0].place_url ?? undefined };
+      }
+    }
+    if (!hit) hit = { name, lat: null, lon: null }; // text-only: may SAY "спроти X"
+    const key = hit.name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(hit);
     }
   }
-  // Text-only hit: may SAY "спроти X", never generates a coordinate link
-  return { name, lat: null, lon: null };
+  return out;
 }
 
 /**
@@ -292,10 +339,12 @@ export class LandmarkService {
 
   /** Public passthrough: resolve a place name against the offline POI table
    *  ("kade e toa Helen Doron?"). Undefined when the map is unavailable or
-   *  nothing matches. */
-  findPlace(name: string): { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined {
+   *  nothing matches. When center is given, the NEAREST branch of a chain
+   *  wins ("TTK Banka" near Капиштец = the Beverly Hills branch, not Ново
+   *  Лисиче). */
+  findPlace(name: string, center?: { lat: number; lon: number }): { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined {
     if (!this.opts.offlineMap?.available) return undefined;
-    return this.opts.offlineMap.findPoiByName(name);
+    return this.opts.offlineMap.findPoiByName(name, center);
   }
 
   /** Resolve the approximate location for a property. Cached in the DB after
@@ -463,13 +512,50 @@ export class LandmarkService {
     const center = resolveSearchCenter(p);
 
     if (!center.trusted) {
+      // GRACE DEGRADATION (the 20:51 bug): osm_low_confidence means the
+      // centroid may be neighborhood-level, not building-level. When the
+      // row still carries REAL coordinates, we may serve the nearest named
+      // POIs with a floor on the claimed distance — a coarse center can
+      // only make the true distance LARGER, never smaller. The 500m
+      // client-facing cap plus the 300m floor keeps every claim honest;
+      // only rows with NO coordinates at all stay fully blocked (a (0,0)
+      // pin would be invented geography).
+      const hasRealCoords = !!p.lat && !!p.lon && (p.lat !== 0 || p.lon !== 0);
+      if (!hasRealCoords) {
+        try {
+          this.db.db.prepare(
+            `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
+          ).run(p.id, 'low_confidence_center', new Date().toISOString());
+        } catch {}
+        try { dbgLog(
+          `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-BLOCKED center untrusted and coordinate-less (lat=${center.lat}, lon=${center.lon}) → queue\n`); } catch {}
+        return [];
+      }
+      const lat = p.lat as number;
+      const lon = p.lon as number;
       try {
         this.db.db.prepare(
           `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
         ).run(p.id, 'low_confidence_center', new Date().toISOString());
       } catch {}
       try { dbgLog(
-        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-BLOCKED center untrusted (lat=${center.lat}, lon=${center.lon}) → queue\n`); } catch {}
+        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-GRACE low-confidence coords (${lat},${lon}) — serving ≥300m-floor POIs\n`); } catch {}
+      // Use the row's REAL coordinates — resolveSearchCenter deliberately
+      // refused them and may have fallen back to (0,0) when the local
+      // geocoder can't match the street.
+      const pois = this.opts.offlineMap?.available
+        ? this.opts.offlineMap.nearestPois(lat, lon, 900, 50) : [];
+      // 300m floor: a neighborhood centroid can be hundreds of meters off,
+      // so anything closer might in truth be farther. Name, ≥300m, ≤500m.
+      const graced = pois
+        .filter(poi => {
+          const d = poi.distance_m ?? Number.POSITIVE_INFINITY;
+          return d >= 300 && d <= 500 && poi.name?.length >= 3 && poi.lat != null && poi.lon != null;
+        })
+        .slice(0, 3)
+        .map(poi => ({ landmark: poi.name, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
+      if (graced.length > 0) return graced;
+      // Sparse map around the centroid → honest fallback for this turn.
       return [];
     }
 
@@ -485,6 +571,21 @@ export class LandmarkService {
             .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
           break;
         }
+      }
+    }
+
+    // FEED LANDMARK PAIRS (the doc's zero-cost add): the feed's own
+    // description is a CHAIN of anchors — "во потегот меѓу X и Y", "спроти
+    // X, до Y". Every validated anchor is a second human-curated reference
+    // for THIS property; top the POI rotation up with them (deduped) so the
+    // L1→L2→L3 rotation carries the anchors ordinary people actually say.
+    if (p.details && p.details.length >= 10) {
+      const chain = extractDetailsLandmarks(p.details, { lat: center.lat, lon: center.lon, trusted: true }, this.opts.offlineMap, 2);
+      for (const d of chain) {
+        if (found.length >= 3) break;
+        if (d.lat == null || d.lon == null) continue; // never claim coords for an unvalidated anchor
+        if (found.some(f => f.name.toLowerCase() === d.name.toLowerCase())) continue;
+        found.push({ name: d.name, distance_m: 0, lat: d.lat, lon: d.lon, place_url: d.place_url, place_id: undefined });
       }
     }
 

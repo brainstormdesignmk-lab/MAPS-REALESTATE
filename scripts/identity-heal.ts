@@ -108,13 +108,24 @@ export interface HealResult {
  * PHASE B2 main pass. Safe to re-run every build: rows already carrying a
  * place_id are skipped, heals are deterministic from current data.
  */
+/** A Google row that can donate its identity AND its captured fields to an
+ *  OSM twin. The two are the same physical place, so the map must serve ONE
+ *  entry — with the OSM (bilingual) name and Google's rating/reviews. */
+interface AnchorRow {
+  rowid: number; name: string; lat: number; lon: number; place_id: string;
+  review_count: number | null; rating: number | null; plus_code: string | null;
+  phone: string | null; website: string | null; price_level: string | null;
+  types: string | null; place_url: string | null;
+}
+
 export function identityHeal(db: Database.Database): HealResult {
   console.log('PHASE B2: Identity propagation (OSM ← Google anchors)');
 
   const anchors = db.prepare(
-    `SELECT rowid, name, lat, lon, place_id FROM pois
+    `SELECT rowid, name, lat, lon, place_id, review_count, rating, plus_code,
+            phone, website, price_level, types, place_url FROM pois
      WHERE source = 'google' AND place_id IS NOT NULL`
-  ).all() as Array<{ rowid: number; name: string; lat: number; lon: number; place_id: string }>;
+  ).all() as AnchorRow[];
 
   if (!anchors.length) {
     console.log('  No identified Google anchors — nothing to heal');
@@ -134,7 +145,55 @@ export function identityHeal(db: Database.Database): HealResult {
     }
   }
 
-  const heal = db.prepare(`UPDATE pois SET lat = ?, lon = ?, place_id = ? WHERE rowid = ?`);
+  // ONE ROW PER PLACE — the merge the pipeline was always meant to perform.
+  // The old design was two-step: `identityHeal` created a duplicate place_id
+  // for the pipeline's dedupe to collapse (keeping MIN(rowid) = the older OSM
+  // row), and the next Phase B pass backfilled Google's fields onto it via
+  // `updateAll` (keyed on place_id). That is exactly what the 65 legacy rows
+  // prove — 61/65 carry a rating, 63/65 carry types, with their Cyrillic
+  // names intact — and it is exactly what `idx_pois_place_id_unique` made
+  // impossible once it was added: the heal could never write the pair, so it
+  // died on its first row and no row has merged since.
+  //
+  // So the merge happens HERE, atomically, never violating the index: the OSM
+  // row takes the anchor's exact pin AND its identity, backfills the anchor's
+  // capture fields (COALESCE — never erase a value), and the now-redundant
+  // anchor row is removed. The survivor is the OSM row, so the bilingual name
+  // survives together with Google's rating/reviews. This also cannot lose
+  // anything the anchor held: Google rows carry no osm_key and no place_url.
+  const mergeIntoOsm = db.prepare(`
+    UPDATE pois SET lat = ?, lon = ?, place_id = ?,
+      review_count = COALESCE(?, review_count),
+      rating       = COALESCE(?, rating),
+      plus_code    = COALESCE(?, plus_code),
+      phone        = COALESCE(?, phone),
+      website      = COALESCE(?, website),
+      price_level  = COALESCE(?, price_level),
+      place_url    = COALESCE(?, place_url),
+      types        = COALESCE(?, types)
+    WHERE rowid = ?`);
+  const dropAnchor = db.prepare(`DELETE FROM pois WHERE rowid = ? AND place_id = ?`);
+  const healPin = db.prepare(`UPDATE pois SET lat = ?, lon = ? WHERE rowid = ?`);
+  // Only a merge whose anchor still solely owns the identity is safe. Anything
+  // else means another row already took it (typically an anchor consumed by an
+  // earlier merge in this same pass) — then we adopt the pin and leave
+  // identity alone, which is always correct and never throws.
+  const pidOwner = db.prepare(`SELECT rowid FROM pois WHERE place_id = ?`);
+  // ORDER MATTERS: the anchor must give up the identity BEFORE the OSM row
+  // takes it. Doing it the other way round makes the pair momentarily share a
+  // place_id and `idx_pois_place_id_unique` rejects the UPDATE (SQLITE_CONSTRAINT_UNIQUE).
+  // Deleting first frees the identity; the whole thing is one transaction, so
+  // a failure rolls back and the anchor is never lost.
+  const mergePair = db.transaction((osmRowid: number, a: AnchorRow) => {
+    dropAnchor.run(a.rowid, a.place_id);   // 1. anchor releases the identity
+    mergeIntoOsm.run(                      // 2. OSM row adopts pin + identity + fields
+      a.lat, a.lon, a.place_id,
+      a.review_count, a.rating, a.plus_code, a.phone, a.website,
+      a.price_level, a.place_url, a.types, osmRowid,
+    );
+  });
+  let merged = 0;
+  let pinOnly = 0;
   let healed = 0;
 
   const rows = db.prepare(
@@ -148,14 +207,14 @@ export function identityHeal(db: Database.Database): HealResult {
     const rowCountries = countriesIn(row.name);
 
     // ---- Tier 3: embassy uniqueness (in-city, same country, unambiguous) --
-    let anchor: { lat: number; lon: number; place_id: string } | null = null;
+    let anchor: AnchorRow | null = null;
     if (/\bembassy\b|ambasada|ambasadi|embassies/.test(semanticNameKey(row.name) + ' ' + normName(row.name))) {
       for (const c of rowCountries) {
         const cands = embassiesByCountry.get(c);
         if (!cands || cands.length !== 1) continue; // ambiguous or unknown → skip
         const cand = cands[0];
         if (countryContradiction(row.name, cand.name)) continue;
-        anchor = { lat: cand.lat, lon: cand.lon, place_id: cand.place_id };
+        anchor = cand;
         break;
       }
     }
@@ -164,11 +223,11 @@ export function identityHeal(db: Database.Database): HealResult {
     if (!anchor) {
       // bbox ~±165m around the row covers both proximity radii
       const cands = db.prepare(
-        `SELECT rowid, name, lat, lon, place_id FROM pois
+        `SELECT rowid, name, lat, lon, place_id, review_count, rating, plus_code,
+                phone, website, price_level, types, place_url FROM pois
          WHERE source = 'google' AND place_id IS NOT NULL
          AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`
-      ).all(row.lat - 0.0015, row.lat + 0.0015, row.lon - 0.002, row.lon + 0.002) as
-        Array<{ name: string; lat: number; lon: number; place_id: string }>;
+      ).all(row.lat - 0.0015, row.lat + 0.0015, row.lon - 0.002, row.lon + 0.002) as AnchorRow[];
 
       let bestD = Infinity;
       for (const a of cands) {
@@ -181,17 +240,26 @@ export function identityHeal(db: Database.Database): HealResult {
         const ok = sameTranslit ? d <= EXACT_RADIUS : sameSemantic && d <= SEMANTIC_RADIUS;
         if (!ok || d >= bestD) continue;
         bestD = d;
-        anchor = { lat: a.lat, lon: a.lon, place_id: a.place_id };
+        anchor = a;
       }
     }
 
     if (anchor) {
-      heal.run(anchor.lat, anchor.lon, anchor.place_id, row.rowid);
+      const owner = pidOwner.get(anchor.place_id) as { rowid: number } | undefined;
+      if (owner && owner.rowid === anchor.rowid) {
+        // The anchor is the sole owner → merge the pair into the OSM row.
+        mergePair(row.rowid, anchor);
+        merged++;
+      } else {
+        // Identity already taken by another row: adopt the exact pin only.
+        healPin.run(anchor.lat, anchor.lon, row.rowid);
+        pinOnly++;
+      }
       healed++;
     }
   }
 
-  console.log(`  Anchors: ${anchors.length}; OSM rows healed: ${healed}`);
+  console.log(`  Anchors: ${anchors.length}; OSM rows healed: ${healed} (${merged} merged identity+data, ${pinOnly} pin-only)`);
   return { healed, repaired: 0, anchors: anchors.length };
 }
 

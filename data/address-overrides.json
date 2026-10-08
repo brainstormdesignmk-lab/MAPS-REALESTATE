@@ -82,7 +82,7 @@
       "lat": 41.9959869,
       "lon": 21.418169,
       "place_id": "0x1354144841501047:0x71a2f884c5dc3050",
-      "note": "Google place data (maps.app.goo.gl/4jkzq2pzskwDyWvT9): Embassy of Montenegro, Vasil Stefanovski 7. OSM row was ~84m off. place_id enables the ?cid= place-card link."
+      "note": "Google place data (Embassy of Montenegro, Vasil Stefanovski 7) — replaces OSM's ~84m-off row."
     },
     {
       "name": "Црногорска Амбасада",
@@ -90,7 +90,7 @@
       "lat": 41.9959869,
       "lon": 21.418169,
       "place_id": "0x1354144841501047:0x71a2f884c5dc3050",
-      "note": "EB 63 feed spelling (alias of Амбасада на Црна Гора); coords+place_id = Google place data (Embassy of Montenegro, Vasil Stefanovski 7)."
+      "note": "EB 63 feed spelling; same Google place as Амбасада на Црна Гора."
     }
   ],
   "aliases": [

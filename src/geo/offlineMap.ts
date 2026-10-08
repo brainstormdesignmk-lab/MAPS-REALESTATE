@@ -49,6 +49,15 @@ export interface LocalPoi {
    *  maps.google.com/?cid=<decimal> — the EXACT place card, immune to name
    *  ambiguity. Populated from overrides and the monthly SerpApi top-up. */
   place_id?: string;
+  /** PROMINENCE (the TC Kapištec lesson): how well-known the place is.
+   *  Google review count — the tie-breaker WITHIN a type tier. OSM rows
+   *  carry none (they lose same-tier ties to Google anchors by design). */
+  review_count?: number | null;
+  rating?: number | null;
+  /** 1 = Google says permanently closed / business_status closed. Still a
+   *  landmark (the building stands — "кај Рамстор" works), but demoted
+   *  below every open place and never an "it's open" reference. */
+  closed?: number | null;
 }
 
 export interface Center {
@@ -63,7 +72,7 @@ export interface GeocodeHit {
   street: string;
 }
 
-export type OfflineResolveSource = 'osm_building' | 'osm_interpolated' | 'osm_low_confidence';
+export type OfflineResolveSource = 'osm_building' | 'osm_interpolated' | 'osm_street_anchor' | 'osm_low_confidence';
 
 /** Result of the instant offline property resolver, tagged with an explicit
  *  trust level. Trusted coords (osm_building / osm_interpolated) may anchor
@@ -71,7 +80,7 @@ export type OfflineResolveSource = 'osm_building' | 'osm_interpolated' | 'osm_lo
  *  must never anchor a landmark claim — they go to the honest "населба"
  *  fallback and the async re-resolution queue geocodes them later. */
 export type OfflineResolve =
-  | { lat: number; lon: number; trusted: true; source: 'osm_building' | 'osm_interpolated' }
+  | { lat: number; lon: number; trusted: true; source: 'osm_building' | 'osm_interpolated' | 'osm_street_anchor' }
   | { lat: number | null; lon: number | null; trusted: false; source: 'osm_low_confidence' };
 
 export interface MapStats {
@@ -102,6 +111,37 @@ const LAT2CYR: Array<[string, string]> = [
   ['u', 'у'], ['f', 'ф'], ['h', 'х'], ['c', 'ц'], ['y', 'ј'], ['zh', 'ж'],
   ['ch', 'ч'], ['sh', 'ш'],
 ];
+
+// The embassies Skopje clients actually name — "Црногорската амбасада" vs
+// the map's "Embassy of Montenegro". Bounded dictionary, not open translation.
+const EMBASSY_COUNTRY_EN: Record<string, string> = {
+  'црногорск': 'Montenegro', 'crnogorsk': 'Montenegro',
+  'бугарск': 'Bulgaria', 'bugarsk': 'Bulgaria',
+  'српск': 'Serbia', 'srpsk': 'Serbia',
+  'грчк': 'Greece', 'grchk': 'Greece',
+  'албанск': 'Albania', 'albansk': 'Albania',
+  'турск': 'Turkey', 'tursk': 'Turkey',
+  'германск': 'Germany', 'germansk': 'Germany',
+  'француск': 'France', 'francusk': 'France',
+  'италијанск': 'Italy', 'italijansk': 'Italy',
+  'американск': 'United States', 'amerikansk': 'United States',
+  'холандск': 'Netherlands', 'holandsk': 'Netherlands',
+  'британск': 'United Kingdom', 'britansk': 'United Kingdom',
+  'австриск': 'Austria', 'austrisk': 'Austria',
+  'швајцарск': 'Switzerland', 'shvajcarsk': 'Switzerland',
+  'шведск': 'Sweden', 'shvedsk': 'Sweden',
+  'руск': 'Russia', 'rusk': 'Russia',
+  'романск': 'Romania', 'romansk': 'Romania',
+  'хрватск': 'Croatia', 'hrvatsk': 'Croatia',
+  'словенечк': 'Slovenia', 'slovenechk': 'Slovenia',
+  'полск': 'Poland', 'polsk': 'Poland',
+  'чешк': 'Czechia', 'chechk': 'Czechia',
+  'словачк': 'Slovakia', 'slovakchk': 'Slovakia',
+  'украинск': 'Ukraine', 'ukrainsk': 'Ukraine',
+  'шпанск': 'Spain', 'shpansk': 'Spain',
+  'кинеск': 'China', 'kinesk': 'China',
+  'јапонск': 'Japan', 'japonsk': 'Japan',
+};
 
 export function toLatin(s: string): string {
   let out = '';
@@ -366,6 +406,21 @@ function effectivePriority(type: string, name: string, distanceM: number): numbe
  *  "кај Алка-У" might not. Multiplier < 1 = lower score = better pick.
  *  A park at ~180m (score ≈ 275) beats a supermarket at 117m (score ≈ 293).
  *  A shop at ≤65m still wins over any permanent landmark (score ≤ 163). */
+/** Address-row provenance. '' = OSM build row (the 7,674 backbone);
+ *  'google_street' = a Google-verified street anchor planted by the
+ *  self-learning loop (scripts/street-teach.ts, the monthly B3 drain).
+ *  The distinction is what lets Stage C trust a taught street's anchor
+ *  while an OSM "ББ" centroid stays untrusted: Google confirmed the
+ *  street EXISTS at that point; OSM's centroid is a cartographic label
+ *  with no ground truth. Rebuilds PRESERVE learned anchors by re-running
+ *  this schema-tolerant migration before inserting OSM rows. */
+const ADDR_SOURCE_DDL = "ALTER TABLE addresses ADD COLUMN source TEXT NOT NULL DEFAULT ''";
+
+function ensureAddressSourceColumn(db: Database.Database): void {
+  const cols = (db.prepare('PRAGMA table_info(addresses)').all() as Array<{ name: string }>).map(c => c.name);
+  if (!cols.includes('source')) db.exec(ADDR_SOURCE_DDL);
+}
+
 const PERMANENCE: Record<string, number> = {
   // Permanent — never relocate, decades-long
   park: 0.55, garden: 0.55, playground: 0.55, nature_reserve: 0.55,
@@ -393,10 +448,16 @@ const PERMANENCE: Record<string, number> = {
 
 export class OfflineMapStore {
   private db: Database.Database | null = null;
+  /** The map file path — learnAddress() needs it to open a read-write conn. */
+  private dbPath: string | null = null;
+  /** Lazy READ-WRITE connection for learnAddress() — scripts teach the map;
+   *  the runtime never opens it (stays read-only by construction). */
+  private rwDb: Database.Database | null = null;
   /** Lazy cache of all distinct address keys for the fuzzy matcher. */
   private keyCache: string[] | null = null;
 
   constructor(dbPath: string) {
+    this.dbPath = dbPath;
     try {
       this.db = new Database(dbPath, { readonly: true });
       // Schema self-upgrade: DBs built before the place_id column (Google
@@ -404,6 +465,8 @@ export class OfflineMapStore {
       // overrides fill it on the next apply/build. readonly connections can
       // still PRAGMA table_info; only the ALTER would fail, and a NULL
       // place_id is handled gracefully everywhere (link falls to next tier).
+      // addresses.source (google_street provenance) carries the same rule.
+      try { ensureAddressSourceColumn(this.db); } catch { /* read-only FS — readers tolerate the missing column */ }
       const cols = (this.db.prepare("PRAGMA table_info(pois)").all() as Array<{ name: string }>)
         .map(c => c.name);
       if (!cols.includes('place_id')) {
@@ -429,6 +492,7 @@ export class OfflineMapStore {
 
   close(): void {
     if (this.db) { this.db.close(); this.db = null; }
+    if (this.rwDb) { try { this.rwDb.close(); } catch { /* ignore */ } this.rwDb = null; }
   }
 
   stats(): MapStats | null {
@@ -449,6 +513,7 @@ export class OfflineMapStore {
     `).all(lat - radiusM / 111000, lat + radiusM / 111000,
            lon - radiusM / 82000,  lon + radiusM / 82000) as Array<{
       name: string; type: string; lat: number; lon: number; source?: string; place_url?: string; place_id?: string;
+      review_count?: number | null; rating?: number | null; closed?: number | null;
     }>;
 
     const inCircle = rows
@@ -457,22 +522,37 @@ export class OfflineMapStore {
 
     // Junk types (taxonomy dirt from the Overpass/Google merge) are never
     // usable as landmarks — filter BEFORE ranking so a "yes" building can't
+    // outrank a real anchor.
+    // Junk types (taxonomy dirt from the Overpass/Google merge) are never
+    // usable as landmarks — filter BEFORE ranking so a "yes" building can't
     // outrank a real anchor. NOTE: 'residential' (bare OSM landuse tag on
     // apartment complexes) is NOT junk when it names a known complex —
     // Беверли Хилс is typed exactly that and is THE landmark of its block.
-    // Only unnamed residential rows are junk; named ones rank like a
-    // neighborhood anchor (0 → still distance-eligible, never dropped).
+    // Only unnamed residential rows are junk; named ones stay eligible.
     const JUNK_TYPES = new Set(['yes', 'place', 'company', '',
       'house', 'building', 'address', 'unknown']);
     const clean = inCircle.filter(r =>
       !JUNK_TYPES.has(normType(r.type)) ||
       (normType(r.type) === 'residential' && !!r.name && r.name.trim().length > 0));
 
-    // Institutional landmark first, then distance. This replaces the
-    // pure-distance sort: a mall at 200m outranks a cafe at 50m — people say
-    // "кај Рамстор", never "кај кафето".
+    // THE RANKING LADDER (the doc's recommendation, implemented):
+    //   1. typeRank — institutional anchor first (a mall at 200m outranks a
+    //      cafe at 50m; people say "кај Рамстор", never "кај кафето")
+    //   2. prominence — log10(review_count+1): within a tier, the famous
+    //      place wins over the quiet one regardless of small distance gaps
+    //   3. distance — the final tie-break
+    // Permanently-closed places sink below everything in their tier (their
+    // prominence is forced negative); Google rows get a hair of prominence
+    // so the OSM/Google same-tier tie goes to the verified anchor.
+    const prominence = (r: { review_count?: number | null; closed?: number | null; source?: string }): number => {
+      if (r.closed === 1) return -1;
+      const base = Math.log10((r.review_count ?? 0) + 1);
+      return r.source === 'google' ? base + 0.01 : base;
+    };
     const ranked = clean.sort((a, b) =>
-      (typeRank(b.type) - typeRank(a.type)) || (a.dist - b.dist));
+      (typeRank(b.type) - typeRank(a.type))
+      || (prominence(b) - prominence(a))
+      || (a.dist - b.dist));
 
     // Dedupe pass — Cyrillic/Latin + case/punctuation tolerant (NOT name
     // variants: "Kipper" vs "Kipper Market - Butel" are different branches
@@ -483,7 +563,7 @@ export class OfflineMapStore {
     // coordinates disagree — this is what keeps two spellings of one embassy
     // from occupying two of the three rotation slots. No distance bound:
     // place_id equality is stronger evidence than any coordinate.
-    const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string; place_id?: string }> = [];
+    const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string; place_id?: string; review_count?: number | null; rating?: number | null; closed?: number | null }> = [];
     for (const poi of ranked) {
       const dup = merged.find(g =>
         (!!poi.place_id && !!g.place_id && poi.place_id === g.place_id) ||
@@ -505,6 +585,11 @@ export class OfflineMapStore {
       lon: p.lon,
       place_url: p.place_url,
       place_id: p.place_id,
+      review_count: p.review_count ?? null,
+      // `rating` was captured and stored (75% of Google rows) but silently
+      // dropped here, so the field LocalPoi declares never reached a client.
+      rating: p.rating ?? null,
+      closed: p.closed ?? 0,
     }));
   }
 
@@ -642,12 +727,14 @@ export class OfflineMapStore {
   /** Stage C — "ББ" (без број / no number) row: the street centroid. Only
    *  used when no numbered building or interpolation exists. A street-level
    *  point, never building-accurate. */
-  private streetCentroid(key: string): { lat: number; lon: number; street: string } | undefined {
+  private streetCentroid(key: string): { lat: number; lon: number; street: string; google: boolean } | undefined {
     if (!this.db) return undefined;
-    return this.db.prepare(
-      `SELECT street, lat, lon FROM addresses WHERE key = ?
-       AND (housenumber = 'ББ' OR housenumber = '') LIMIT 1`
-    ).get(key) as { street: string; lat: number; lon: number } | undefined;
+    const hit = this.db.prepare(
+      `SELECT street, lat, lon, source FROM addresses WHERE key = ?
+       AND (housenumber = 'ББ' OR housenumber = '')
+       ORDER BY source DESC LIMIT 1`
+    ).get(key) as { street: string; lat: number; lon: number; source?: string | null } | undefined;
+    return hit ? { lat: hit.lat, lon: hit.lon, street: hit.street, google: hit.source === 'google_street' } : undefined;
   }
 
   /** Stage D — absolute last resort: the first building on the street. Used
@@ -687,9 +774,16 @@ export class OfflineMapStore {
       }
     }
 
-    // Stage C: street centroid ("ББ" / no number)
+    // Stage C: street centroid ("ББ" / no number). An OSM centroid row is a
+    // cartographic label — NEVER trusted. A GOOGLE-VERIFIED street anchor
+    // (learned by the teach loop) is: Google confirmed the street at that
+    // point, so any house number on it gets an honest street-level fix and
+    // the offline resolver serves the property trusted immediately.
     const centroid = this.streetCentroid(key);
-    if (centroid) return { ...centroid, trusted: false, source: 'osm_low_confidence' };
+    if (centroid) {
+      if (centroid.google) return { lat: centroid.lat, lon: centroid.lon, street: centroid.street, trusted: true, source: 'osm_street_anchor' };
+      return { lat: centroid.lat, lon: centroid.lon, street: centroid.street, trusted: false, source: 'osm_low_confidence' };
+    }
 
     // Stage D: first building on the street — street-level guess
     const first = this.firstBuilding(key);
@@ -711,48 +805,264 @@ export class OfflineMapStore {
     const hit = this.resolveAddress(address, key);
     if (!hit) return { lat: null, lon: null, trusted: false, source: 'osm_low_confidence' };
     if (hit.trusted) {
-      return { lat: hit.lat, lon: hit.lon, trusted: true as const, source: hit.source as 'osm_building' | 'osm_interpolated' };
+      return { lat: hit.lat, lon: hit.lon, trusted: true as const, source: hit.source as 'osm_building' | 'osm_interpolated' | 'osm_street_anchor' };
     }
     return { lat: hit.lat, lon: hit.lon, trusted: false as const, source: 'osm_low_confidence' as const };
+  }
+
+  /** THE SELF-LEARNING MAP — write a Google-verified street+number → coords
+   *  pair back into the LIVE map DB. Every time Google resolves a street the
+   *  local snapshot lacks ("if I search it in Google Maps I find it"), the
+   *  finding is PERSISTED here, so the next property on the same street
+   *  resolves OFFLINE at import (trusted, exact-building stage) and never
+   *  needs Google again. This is the growth mechanism that closes the
+   *  "street not found" gap permanently:
+   *    import-time miss → queued → monthly Google geocode → MAP LEARNS
+   *    → every future property on that street resolves offline.
+   *  Idempotent: re-learning the same address is a no-op (or refreshes
+   *  coordinates). Learned rows carry source='google_learned' so a rebuild
+   *  can distinguish and PRESERVE them. Refuses landmark-style addresses
+   *  with no street ("БИСЕР") — nothing generalizable to learn.
+   *  Returns true when a row was written. */
+  learnAddress(address: string, lat: number, lon: number): boolean {
+    if (!this.db || !address) return false;
+    const key = streetKey(address);
+    const houseNum = extractHouseNum(address);
+    // Display name: the original-case street without the trailing number
+    // (normalizeStreet lowercases — fine for keys, ugly for display).
+    const street = address.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
+    if (!key || key.length < 3 || !houseNum || !street) return false;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+    // Writes need a READ-WRITE connection — open it lazily and keep it (a
+    // cron drain teaches many streets in one run). On failure (read-only FS,
+    // concurrent rebuild) learning degrades to a no-op: false, no crash.
+    if (!this.rwDb) {
+      try { this.rwDb = new Database(this.dbPath ?? '', { timeout: 5000 }); } catch { return false; }
+    }
+    const w = this.rwDb;
+    if (!w) return false;
+    try {
+      // Upsert on (street, housenumber): re-learning refreshes coordinates.
+      const existing = w.prepare(
+        'SELECT rowid FROM addresses WHERE key = ? AND housenumber = ?'
+      ).get(key, houseNum) as { rowid: number } | undefined;
+      if (existing) {
+        w.prepare('UPDATE addresses SET lat = ?, lon = ? WHERE rowid = ?').run(lat, lon, existing.rowid);
+      } else {
+        w.prepare(
+          "INSERT INTO addresses (street, housenumber, lat, lon, key) VALUES (?, ?, ?, ?, ?)"
+        ).run(street, houseNum, lat, lon, key);
+      }
+      // Invalidate the fuzzy-key cache so the new street is visible
+      // to resolveKey()/fuzzyKey() immediately.
+      this.keyCache = null;
+      return true;
+    } catch { return false; }
+  }
+
+  /** THE STREET-LEVEL LEARN (October's class (c)): plant a Google-verified
+   *  STREET anchor — "one geocode teaches the whole street". The anchor is a
+   *  centroid row (housenumber 'ББ') carrying source='google_street', which
+   *  Stage C trusts (source 'osm_street_anchor'): every house number on the
+   *  street resolves OFFLINE trusted from now on, even with a single learned
+   *  point. A Google pin is a street's own door; the street exists around
+   *  it. Number-level precision for a SPECIFIC number still goes through
+   *  learnAddress(), which outranks the anchor (Stage A before Stage C).
+   *  Idempotent: re-teaching refreshes the anchor's coordinates. Returns
+   *  true when the anchor row was written. */
+  learnStreet(street: string, lat: number, lon: number): boolean {
+    if (!this.db || !street) return false;
+    const key = streetKey(street);
+    // Display name: original case, no trailing house number (same rule as
+    // learnAddress — normalizeStreet lowercases, fine for keys, ugly for
+    // display and for later per-number learning on the same street).
+    const name = street.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
+    if (!key || key.length < 3 || !name) return false;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+    if (!this.rwDb) {
+      try { this.rwDb = new Database(this.dbPath ?? '', { timeout: 5000 }); } catch { return false; }
+    }
+    const w = this.rwDb;
+    if (!w) return false;
+    try {
+      ensureAddressSourceColumn(w);
+      // Upsert on the anchor row: re-teaching refreshes coordinates.
+      const existing = w.prepare(
+        "SELECT rowid FROM addresses WHERE key = ? AND (housenumber = 'ББ' OR housenumber = '') AND source = 'google_street'"
+      ).get(key) as { rowid: number } | undefined;
+      if (existing) {
+        w.prepare('UPDATE addresses SET lat = ?, lon = ? WHERE rowid = ?').run(lat, lon, existing.rowid);
+      } else {
+        // One anchor per street: ignore when a centroid row already exists
+        // (an OSM ББ row) — UPDATE the OSM row instead of INSERTing a twin.
+        const osmCentroid = w.prepare(
+          "SELECT rowid FROM addresses WHERE key = ? AND (housenumber = 'ББ' OR housenumber = '')"
+        ).get(key) as { rowid: number } | undefined;
+        if (osmCentroid) {
+          w.prepare("UPDATE addresses SET lat = ?, lon = ?, source = 'google_street' WHERE rowid = ?").run(lat, lon, osmCentroid.rowid);
+        } else {
+          w.prepare(
+            "INSERT INTO addresses (street, housenumber, lat, lon, key, source) VALUES (?, 'ББ', ?, ?, ?, 'google_street')"
+          ).run(name, lat, lon, key);
+        }
+        this.keyCache = null;
+      }
+      return true;
+    } catch { return false; }
+  }
+
+  /** THE MAP KEEPS ITSELF HONEST: delete every POI row with coordinates
+   *  outside the Skopje bbox. Google's fuzzy geographic expansion leaks
+   *  far-away places into tile scrapes (a Skopje supermarket search returned
+   *  "Walgreens Pharmacy" — California, and a New York hospital), and an
+   *  Overpass mirror once pulled 428 foreign rows. A POI outside the city
+   *  can never be honestly "во близина" of a property, so it is pure
+   *  contamination. Called at the start of every monthly run (after the
+   *  Phase A restore) so contamination of ANY origin cannot survive a run.
+   *  Returns the number of rows deleted. */
+  pruneOutsideBbox(): number {
+    if (!this.db) return 0;
+    if (!this.rwDb) {
+      try { this.rwDb = new Database(this.dbPath ?? '', { timeout: 5000 }); } catch { return 0; }
+    }
+    const w = this.rwDb;
+    if (!w) return 0;
+    try {
+      const res = w.prepare(
+        `DELETE FROM pois WHERE lat IS NOT NULL AND lon IS NOT NULL
+           AND (lat < 41.95 OR lat > 42.05 OR lon < 21.35 OR lon > 21.50)`
+      ).run();
+      return res.changes;
+    } catch { return 0; }
+  }
+
+  /** True when the map knows this street key at all (any building rows). */
+  knowsStreet(address: string): boolean {
+    if (!this.db || !address) return false;
+    const key = streetKey(address);
+    if (!key) return false;
+    const row = this.db.prepare('SELECT COUNT(*) AS n FROM addresses WHERE key = ?').get(key) as { n: number };
+    return row.n > 0;
+  }
+
+  /** How many NUMBERED building rows the street carries (excludes "ББ"/
+    * blank-centroid rows). The census's class-(b) "thin" test: ≥2 numbered
+    * rows make interpolation possible for any in-range number; 0–1 rows is
+    * thin even when the street itself is known. Also the trust input for
+    * taught-anchor streets (a street with ≥2 real numbers outranks its
+    * Google anchor). */
+  numberedRowCount(address: string): number {
+    if (!this.db || !address) return 0;
+    const key = streetKey(address);
+    if (!key) return 0;
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM addresses
+       WHERE key = ? AND housenumber != '' AND housenumber != 'ББ'`
+    ).get(key) as { n: number };
+    return row.n;
+  }
+
+  /** THE SCRAPER CONTRACT, applied to the LIVE map: add any missing capture
+   *  columns (review_count, rating, plus_code, …) in one read-write pass.
+   *  Old DBs keep working — every reader tolerates NULL. Returns the column
+   *  names that were added (empty when the schema is current). */
+  ensurePoiColumns(): string[] {
+    if (!this.db) return [];
+    const COLUMNS: Record<string, string> = {
+      review_count: 'INTEGER', rating: 'REAL', plus_code: 'TEXT',
+      phone: 'TEXT', website: 'TEXT', price_level: 'TEXT',
+      closed: "INTEGER NOT NULL DEFAULT 0", types: 'TEXT',
+    };
+    const added: string[] = [];
+    if (!this.rwDb) {
+      try { this.rwDb = new Database(this.dbPath ?? '', { timeout: 5000 }); } catch { return []; }
+    }
+    try {
+      const cols = (this.rwDb.prepare('PRAGMA table_info(pois)').all() as Array<{ name: string }>).map(c => c.name);
+      for (const [col, ddl] of Object.entries(COLUMNS)) {
+        if (!cols.includes(col)) {
+          this.rwDb.exec(`ALTER TABLE pois ADD COLUMN ${col} ${ddl}`);
+          added.push(col);
+        }
+      }
+      return added;
+    } catch { return []; }
   }
 
   /** Search POIs by name — for landmark-style addresses like "Кај Бранка"
    *  or "Палома Бјанка" where the address IS the landmark, not a street.
    *  Returns the best match (exact > starts-with > contains). */
-  findPoiByName(name: string): { lat: number; lon: number; name: string; place_url?: string; place_id?: string } | undefined {
+  findPoiByName(name: string, center?: { lat: number; lon: number }): { lat: number; lon: number; name: string; place_url?: string; place_id?: string } | undefined {
     if (!this.db || !name) return undefined;
     // Strip location prepositions AND feed typos of them ("как" for "кај").
-    const clean = name.replace(/^(?:кај|спроти|как|кај штипски|кај скопски)\s+/i, '').trim();
+    let clean = name.replace(/^(?:кај|спроти|как|кај штипски|кај скопски)\s+/i, '').trim();
     if (!clean || clean.length < 2) return undefined;
+    // EMBASSY ALIASES — clients say "Црногорска амбасада"; Google stores
+    // "Embassy of Montenegro". Word-by-word matching can never bridge
+    // country-adjective + амбасада to its English title, so a bounded
+    // dictionary rewrites the needle. Only the амбасада family — no open-ended
+    // translation, no false broadening.
+    const embassy = clean.match(/(\S+)\s+амбасад[ау]/i);
+    if (embassy) {
+      const country = embassy[1].toLowerCase().replace(/(?:те|та|от|ов|ите)?$/, '');
+      const en = EMBASSY_COUNTRY_EN[country];
+      if (en) clean = `Embassy of ${en}`;
+    }
     // Prefer SHORTER names ("ТЦ Бисер" > "Бисер Травел") — the shorter name
     // is the more precise landmark reference.
     // NOTE: SQL LIKE ... COLLATE NOCASE does NOT fold non-ASCII case, so
     // "тц олимпико" would never match "ТЦ Олимпико". Do the contains-test in
     // JS where toLowerCase() is Unicode-aware. Table is ~4k rows — trivial.
+    // SCRIPT BRIDGE — clients type Latin ("skopjanka"), OSM stores Cyrillic
+    // ("ТЦ Скопјанка"). Match in BOTH canonical scripts: the raw needle and
+    // the transliterated one. The POI row's folded Latin form is precomputed
+    // once per call from the already-loaded table (sub-ms at 4k rows).
     const needle = clean.toLowerCase();
+    const needleCyr = /[\\u0400-\\u04FF]/.test(needle) ? needle : toCyrillic(needle);
     let rows = (this.db.prepare(
       'SELECT name, type, lat, lon, place_url, place_id FROM pois'
     ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string }>)
-      .filter(r => r.name.toLowerCase().includes(needle));
+      .filter(r => {
+        const low = r.name.toLowerCase();
+        return low.includes(needle) || low.includes(needleCyr)
+          || translitToLatin(low).includes(needle);
+      });
     // Progressive shortening: "Сити Мол ' Руските Згради" → "Сити Мол"
     // (head) and "Шампионче Как Кипер Маркет" → "кипер маркет" (tail).
     // Never fall to a SINGLE word — "народен" would match
     // "Македонски народен театар" for an unrelated address.
     const words = clean.split(/\s+/);
     if (rows.length === 0 && words.length > 2) {
+      // Short candidates get the SAME script bridge as the full needle: the
+      // client's Latin echo ("KADE TI E TOA 26 JULI TC ?") shortens to
+      // "26 juli", which must still find the Cyrillic "ТЦ 26 Јули" row (the
+      // [12:48] transcript — the unbridged shortening pass killed the hit).
       const candidates = [words.slice(0, 2).join(' '), words.slice(-2).join(' ')]
         .map(w => w.toLowerCase())
         .filter(w => w.length >= 3);
-      for (const short of candidates) {
+      const candidatesCyr = candidates.map(w => /[\u0400-\u04FF]/.test(w) ? w : toCyrillic(w));
+      for (const short of [...candidates, ...candidatesCyr]) {
         rows = (this.db.prepare(
           'SELECT name, type, lat, lon, place_url FROM pois'
         ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string }>)
-          .filter(r => r.name.toLowerCase().includes(short));
+          .filter(r => {
+            const low = r.name.toLowerCase();
+            return low.includes(short) || translitToLatin(low).includes(short);
+          });
         if (rows.length > 0) break;
       }
     }
     if (rows.length > 0) {
-      rows.sort((a, b) => a.name.length - b.name.length);
+      // Branch disambiguation: chains (TTK Banka, Tinex, Kipper…) have many
+      // rows sharing one name. "Nearest to the client's context" (the shown
+      // property) is the branch they mean — NEVER a global shortest-name
+      // pick, which sent a Капиштец client to a Ново Лисиче branch.
+      if (center) {
+        rows.sort((a, b) =>
+          distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon));
+      } else {
+        rows.sort((a, b) => a.name.length - b.name.length);
+      }
       const best = rows[0];
       try { fs.appendFileSync('/tmp/landmark-debug.log',
         `[${new Date().toISOString()}] findPoiByName(${clean}): ${rows.length} matches → ${best.name} (${best.name.length} chars)\n`); } catch {}
@@ -1024,7 +1334,7 @@ function applyOverrides(db: Database.Database, file: string): number {
     const n = (db.prepare('SELECT COUNT(*) AS n FROM pois WHERE name = ? AND lat = ? AND lon = ?')
       .get(p.name, p.lat, p.lon) as { n: number }).n;
     if (n > 0) continue;
-    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+    db.prepare(`INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(place_id) DO UPDATE SET name = excluded.name, lat = excluded.lat, lon = excluded.lon`)
       .run(p.name, p.type, p.lat, p.lon, 'osm', p.place_id ?? null);
     added++;
   }
@@ -1033,7 +1343,7 @@ function applyOverrides(db: Database.Database, file: string): number {
   for (const r of ov.replaces ?? []) {
     if (!r.name || !r.type || !Number.isFinite(r.lat ?? NaN) || !Number.isFinite(r.lon ?? NaN)) continue;
     const del = db.prepare('DELETE FROM pois WHERE name = ?').run(r.name);
-    db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?)')
+    db.prepare(`INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(place_id) DO UPDATE SET name = excluded.name, lat = excluded.lat, lon = excluded.lon`)
       .run(r.name, r.type, r.lat, r.lon, 'osm', r.place_id ?? null);
     added += del.changes + 1;
   }
@@ -1072,8 +1382,16 @@ function applyOverrides(db: Database.Database, file: string): number {
 
 export function writeMap(
   dbPath: string,
-  pois: Array<{ name: string; type: string; lat: number; lon: number; source?: string; place_url?: string; place_id?: string }>,
-  addresses: Array<{ street: string; housenumber: string; lat: number; lon: number }>,
+  pois: Array<{
+    name: string; type: string; lat: number; lon: number; source?: string;
+    place_url?: string; place_id?: string;
+    // THE SCRAPER CONTRACT: full SerpApi capture (all optional — OSM rows
+    // carry none of these).
+    review_count?: number | null; rating?: number | null; plus_code?: string | null;
+    phone?: string | null; website?: string | null; price_level?: string | null;
+    closed?: number | null; types?: string | null;
+  }>,
+  addresses: Array<{ street: string; housenumber: string; lat: number; lon: number; source?: string }>,
 ): MapStats {
   fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
@@ -1103,7 +1421,16 @@ export function writeMap(
         lon  REAL NOT NULL,
         source TEXT NOT NULL DEFAULT 'osm',
         place_url TEXT,
-        place_id TEXT
+        place_id TEXT,
+        review_count INTEGER,
+        rating REAL,
+        plus_code TEXT,
+        phone TEXT,
+        website TEXT,
+        price_level TEXT,
+        closed INTEGER NOT NULL DEFAULT 0,
+        types TEXT,
+        UNIQUE (place_id)
       );
       CREATE INDEX idx_pois_lat ON pois(lat);
       CREATE TABLE addresses (
@@ -1111,7 +1438,8 @@ export function writeMap(
         housenumber TEXT NOT NULL DEFAULT '',
         lat         REAL NOT NULL,
         lon         REAL NOT NULL,
-        key         TEXT NOT NULL
+        key         TEXT NOT NULL,
+        source      TEXT NOT NULL DEFAULT ''
       );
       CREATE INDEX idx_addr_key ON addresses(key);
     `);
@@ -1119,12 +1447,36 @@ export function writeMap(
     // Wrap ALL inserts in a single transaction — 10-100x faster than
     // auto-commit per row.
     const insertAll = db.transaction(() => {
-      const insPoi = db.prepare('INSERT INTO pois (name, type, lat, lon, source, place_url, place_id) VALUES (?, ?, ?, ?, ?, ?, ?)');
-      for (const p of pois) insPoi.run(p.name, p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null, p.place_id ?? null);
+      // Upsert by place_id: re-scrapes UPDATE the existing Google row
+      // instead of INSERT OR IGNORE-ing a duplicate. OSM rows (place_id=NULL)
+      // are NOT affected — they still INSERT normally.
+      // Uses ON CONFLICT(place_id) which maps to the table's UNIQUE(place_id)
+      // constraint. SQLite's standard UNIQUE allows multiple NULLs, so OSM
+      // rows (NULL place_id) never conflict.
+      const insPoi = db.prepare(`INSERT INTO pois (
+        name, type, lat, lon, source, place_url, place_id,
+        review_count, rating, plus_code, phone, website, price_level, closed, types
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(place_id) DO UPDATE SET
+        name = excluded.name,
+        type = excluded.type,
+        lat = excluded.lat,
+        lon = excluded.lon,
+        source = excluded.source,
+        place_url = COALESCE(excluded.place_url, pois.place_url),
+        review_count = excluded.review_count,
+        rating = excluded.rating,
+        types = excluded.types,
+        closed = excluded.closed`);
+      for (const p of pois) insPoi.run(
+        p.name, p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null, p.place_id ?? null,
+        p.review_count ?? null, p.rating ?? null, p.plus_code ?? null, p.phone ?? null,
+        p.website ?? null, p.price_level ?? null, p.closed ?? 0, p.types ?? null,
+      );
       console.log(`[skopje-map] inserted ${pois.length} POIs`);
 
-      const insAddr = db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key) VALUES (?, ?, ?, ?, ?)');
-      for (const a of addresses) insAddr.run(a.street, a.housenumber, a.lat, a.lon, streetKey(a.street));
+      const insAddr = db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key, source) VALUES (?, ?, ?, ?, ?, ?)');
+      for (const a of addresses) insAddr.run(a.street, a.housenumber, a.lat, a.lon, streetKey(a.street), a.source ?? '');
       console.log(`[skopje-map] inserted ${addresses.length} addresses`);
       // Manual corrections folded INTO the build (address-overrides.json next
       // to the target DB) so a weekly OSM rebuild never wipes them. Skips
@@ -1146,8 +1498,43 @@ export function writeMap(
 }
 
 /** Pull + rebuild the map. Writes a temp file and renames atomically, so a
- *  failed pull never leaves a half-written map for the resolver. */
+ *  failed pull never leaves a half-written map for the resolver.
+ *
+ *  Fix E — REBUILD PROTECTION: before writing, carry Google-enriched rows
+ *  (place_id + review/rating data) from the existing DB into the rebuild.
+ *  Without this, writeMap() would wipe the ~3,200 Google-anchored rows every
+ *  time buildSkopjeDb runs, since it creates a fresh DB from OSM-only fetchPois.
+ *  Merging Google rows into the pois array + the ON CONFLICT upsert in writeMap
+ *  makes the map rebuild-safe WITHOUT a cron or internet dependency: Google
+ *  data persists forever unless the place_id row is explicitly removed.
+ */
 export async function buildSkopjeDb(dbPath: string): Promise<MapStats> {
   const [pois, addresses] = await Promise.all([fetchPois(), fetchAddresses()]);
+
+  // Carry Google-enriched rows through the rebuild.
+  try {
+    if (existsSync(dbPath)) {
+      const existing = new Database(dbPath, { readonly: true });
+      const googlePois = existing.prepare(
+        `SELECT name, type, lat, lon, source, place_url, place_id,
+           review_count, rating, plus_code, phone, website, price_level, closed, types
+           FROM pois WHERE place_id IS NOT NULL`
+      ).all() as Array<{
+        name: string; type: string; lat: number; lon: number; source?: string;
+        place_url?: string; place_id?: string;
+        review_count?: number | null; rating?: number | null; plus_code?: string | null;
+        phone?: string | null; website?: string | null; price_level?: string | null;
+        closed?: number | null; types?: string | null;
+      }>;
+      existing.close();
+      if (googlePois.length > 0) {
+        console.log(`[skopje-map] carrying ${googlePois.length} Google-enriched POIs through rebuild`);
+        pois.push(...googlePois);
+      }
+    }
+  } catch {
+    // Existing DB missing or unreadable — fresh build (e.g., first run).
+  }
+
   return writeMap(dbPath, pois, addresses);
 }

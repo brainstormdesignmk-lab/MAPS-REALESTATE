@@ -328,12 +328,14 @@ async function main() {
     console.log(`  ${type}: ${count}`);
   }
 
-  // Read existing addresses from current DB (preserve OSM address data)
-  let existingAddresses: Array<{ street: string; housenumber: string; lat: number; lon: number }> = [];
+  // Read existing addresses from current DB (preserve OSM address data —
+  // including google_street anchors taught by the self-learning loop; their
+  // source column is what keeps Stage C trusting them after a rebuild).
+  let existingAddresses: Array<{ street: string; housenumber: string; lat: number; lon: number; source?: string }> = [];
   try {
     const Database = (await import('better-sqlite3')).default;
     const oldDb = new Database(DB_PATH, { readonly: true });
-    existingAddresses = oldDb.prepare('SELECT street, housenumber, lat, lon FROM addresses').all() as any[];
+    existingAddresses = oldDb.prepare('SELECT street, housenumber, lat, lon, source FROM addresses').all() as any[];
     oldDb.close();
     console.log(`[build-google-map] Preserved ${existingAddresses.length} existing addresses`);
   } catch { /* no existing DB */ }

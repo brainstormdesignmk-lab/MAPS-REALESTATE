@@ -28,6 +28,10 @@ import { Db } from '../store/db';
 import { LandmarkService, cacheLandmark, type PropertyRow } from './landmarks';
 import { OfflineMapStore } from './offlineMap';
 
+function dbgLog(line: string): void {
+  if (process.env.DBG_GEO) { try { process.stderr.write(line); } catch { /* ignore */ } }
+}
+
 /** Stop geocoding (and thus stop draining) below this many searches left. */
 export const BUDGET_STOP = 20;
 
@@ -78,6 +82,10 @@ export interface DrainResult {
   googleUpgraded: number;
   /** Properties whose landmark was (re)cached from the refreshed POI table. */
   landmarkCached: number;
+  /** Streets+numbers the map LEARNED from Google geocodes (the self-learning
+   *  map: a bbox-valid geocode is written back into skopje-pois.db so future
+   *  properties on the same street resolve offline at import). */
+  mapLearned: number;
   /** Rows left queued because the budget dropped below BUDGET_STOP. */
   budgetStopped: number;
   /** Rows still in the queue after the drain. */
@@ -86,7 +94,7 @@ export interface DrainResult {
 
 export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
   const { db, offlineMap, getProperty, updatePropertyGeo, geocode, searchesLeft } = deps;
-  const res: DrainResult = { processed: 0, googleUpgraded: 0, landmarkCached: 0, budgetStopped: 0, leftInQueue: 0 };
+  const res: DrainResult = { processed: 0, googleUpgraded: 0, landmarkCached: 0, mapLearned: 0, budgetStopped: 0, leftInQueue: 0 };
 
   const rows = db.db.prepare(
     `SELECT property_id, reason FROM geo_reresolve_queue ORDER BY property_id`
@@ -134,6 +142,15 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
           geocoded_at: new Date().toISOString(),
         });
         res.googleUpgraded++;
+        // THE SELF-LEARNING MAP: Google just resolved a street the local
+        // snapshot lacked. PERSIST the street+number → coords pair so the
+        // NEXT property on that street resolves offline at import — the
+        // same street never needs Google twice. This is the growth loop
+        // that makes "street not found" converge to zero.
+        if (offlineMap.learnAddress(prop.address!, lat, lon)) {
+          res.mapLearned++;
+          try { dbgLog(`[${new Date().toISOString()}] MAP-LEARNED "${prop.address}" → (${lat},${lon})\n`); } catch {}
+        }
       }
       // Outside the bbox or a geocode miss → the row STAYS osm_low_confidence.
       // Never write an unvalidated coordinate, never claim google_cached.

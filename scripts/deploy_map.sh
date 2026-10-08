@@ -7,7 +7,7 @@
 # prints [db:xxxxxxxx] so mismatch is visible in the first second.
 #
 # Usage:
-#   scripts/deploy_map.sh user@host /path/to/bot
+#   scripts/deploy_map.sh user@host /path/to/inbound_final
 #
 # Steps on THIS machine: verify DB opens → write checksum → tar → scp.
 # Steps on TARGET (run automatically via ssh): backup old db, extract,
@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 user@host /path/to/bot"
+  echo "Usage: $0 user@host /path/to/inbound_final"
   exit 1
 fi
 TARGET="$1"

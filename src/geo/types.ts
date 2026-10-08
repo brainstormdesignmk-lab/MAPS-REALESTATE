@@ -22,6 +22,10 @@ export const LANDMARK_PREFERENCE: Record<string, number> = {
   diplomatic: 5, embassy: 5, government: 5, townhall: 5,
   mall: 5, school: 4, university: 4, hospital: 4, clinic: 4,
   police: 4, fire_station: 4,
+  // Transit stops — "спроти автобуската" is the most-used anchor in Skopje
+  // speech (the doc's Phase A add). Named stops only ever enter the map.
+  bus_station: 4, tram_station: 4, tram_stop: 4,
+  kindergarten: 3, fuel: 2, atm: 2,
   cathedral: 3, place_of_worship: 3, church: 3, mosque: 3,
   pharmacy: 3, supermarket: 3, museum: 3, stadium: 3,
   bank: 2, park: 2, gallery: 2, theatre: 2, library: 2,
