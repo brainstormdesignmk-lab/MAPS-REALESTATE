@@ -11,3 +11,5 @@ GOOGLEMAPS_API_KEY.txt
 tmp/
 data/*.pre-*
 data/*.bak
+map-deploy-*.tar.gz
+data/*.db.sha256
