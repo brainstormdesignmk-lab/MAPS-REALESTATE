@@ -364,15 +364,31 @@ export class LandmarkService {
           ? this.opts.offlineMap.geocodeAddress(p.address) : undefined;
       } catch { propGeo = undefined; }
       const FEED_MAX_DISTANCE_M = 800;
-      const guarded = p.landmarks.map(l => ({ l, hit: publicPlace({ landmark: l.landmark, type: l.type ?? 'place', mapsUrl: l.maps_url, source: 'feed' as const }) }))
-        .filter((x): x is { l: FeedLandmark; hit: Landmark } => !!x.hit)
+      type PoiHit = { lat: number; lon: number; name: string; place_url?: string; place_id?: string } | undefined;
+      // PIN, NOT SEARCH (the banned link form): the feed stores Google's
+      // *name-search* URL ("maps/search/?api=1&query=<name>"), which opens a
+      // results LIST rather than the place — the exact form the project banned
+      // for landmark answers. The landmark NAME is authoritative from the feed;
+      // the PIN is resolved here against the offline POI table — place_id → the
+      // exact place card, else a coordinate pin. The feed's URL survives only
+      // for places the map does not know, where it is the only evidence there is.
+      const guarded = p.landmarks.map(l => {
+        let poi: PoiHit;
+        try {
+          poi = this.opts.offlineMap?.available ? this.opts.offlineMap.findPoiByName(l.landmark) : undefined;
+        } catch { poi = undefined; }
+        const pin = poi ? landmarkLink(l.landmark, poi.place_id ?? null, poi.lat, poi.lon) : '';
+        return { l, poi, hit: publicPlace({
+          landmark: l.landmark, type: l.type ?? 'place',
+          mapsUrl: pin || l.maps_url, source: 'feed' as const,
+        }) };
+      })
+        .filter((x): x is { l: FeedLandmark; poi: PoiHit; hit: Landmark } => !!x.hit)
         .filter(x => {
           if ((x.l.distance_m ?? 0) > FEED_MAX_DISTANCE_M) return false;
-          if (!propGeo || !this.opts.offlineMap) return true;
+          if (!propGeo || !x.poi) return true; // cannot measure — benefit of the doubt
           try {
-            const poi = this.opts.offlineMap.findPoiByName(x.l.landmark);
-            if (!poi) return true; // cannot measure — give it the benefit of the doubt
-            const d = _distM(propGeo.lat, propGeo.lon, poi.lat, poi.lon);
+            const d = _distM(propGeo.lat, propGeo.lon, x.poi.lat, x.poi.lon);
             if (d > FEED_MAX_DISTANCE_M) {
               try { dbgLog(
                 `[${new Date().toISOString()}] EB ${p.eb}: REJECT-FEED ${x.l.landmark} — ${Math.round(d)}m > ${FEED_MAX_DISTANCE_M}m\n`); } catch {}
