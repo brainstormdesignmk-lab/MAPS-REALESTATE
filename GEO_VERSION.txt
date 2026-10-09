@@ -1,7 +1,7 @@
 b8342296ccb8214a7b6bf8de908ab356  src/geo/dedupeSuspects.ts
 5012549b1cf6343a903eb858e8d17166  src/geo/importGeo.ts
 c2ac2416669bdbccce69d177d8f8e1e7  src/geo/landmarks.ts
-c25d73a3bffb3166491ba2e81f81dd1e  src/geo/offlineMap.ts
+9fd81a03e4bc250c1e7fe5305b283cd0  src/geo/offlineMap.ts
 e2d669def829e0ed75ff75600fcbb373  src/geo/poisonSweep.ts
 a6a143059fdbe154c01c4ab68338080a  src/geo/precision.ts
 52c088bd0a08e7736ade233f3947055a  src/geo/queueDrain.ts
