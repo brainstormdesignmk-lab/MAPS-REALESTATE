@@ -334,6 +334,14 @@ function publicPlace(l: Landmark | undefined): Landmark | undefined {
   return l;
 }
 
+/** The client-facing ceiling for a landmark claim, in metres. The runtime
+ *  rotation (nearbyLandmarks) has always capped its claims here, and the feed
+ *  enricher writes with the same rule — anything farther is a different
+ *  neighbourhood, not "во близина". The reader (properties.parseFeedLandmarks)
+ *  enforces it too, because rows written before the cap still carry 600 m–1.2 km
+ *  entries and a stored list must not be able to smuggle one past the rule. */
+export const FEED_LANDMARK_MAX_M = 500;
+
 /** Strip OUR OWN list annotation from an LLM answer.
  *
  *  The pick prompt hands the model lines like
