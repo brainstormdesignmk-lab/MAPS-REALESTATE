@@ -357,14 +357,27 @@ export function stripPoiAnnotation(s: string): string {
     .trim();
 }
 
+/** True when every opening quote has a closing partner. Apostrophes are
+ *  ignored — they sit mid-word in Macedonian names ("Кафе 'Мак'"). */
+function balancedQuotes(s: string): boolean {
+  return (s.match(/[„«]/g) ?? []).length === (s.match(/[“”»]/g) ?? []).length;
+}
+
 export function sanitizeLandmarkAnswer(raw: string, street?: string): string | undefined {
   let s = raw.trim().split(/\n/)[0].trim(); // the LLM's first line only
   s = s
     .replace(/^\d+[.)]\s*/, '')        // "1. Кафе бар" / "2) …"
     .replace(/^[„“”«»"'`\[\]()\-*_]+/, '') // leading decoration
-    .replace(/[„“”«»"'`\[\]()\-*_]+$/, '') // trailing decoration
+    .trim();
+  // Trailing decoration — but a name may legitimately CONTAIN quotes
+  // („Приватна градинка „Little Me“). If stripping the tail would leave an
+  // opening quote without its partner, the tail was content, not decoration.
+  const beforeTail = s;
+  s = s
+    .replace(/[„“”«»"'`\[\]()\-*_]+$/, '')
     .replace(/\s+/g, ' ')
     .trim();
+  if (!balancedQuotes(s) && balancedQuotes(beforeTail)) s = beforeTail.replace(/\s+/g, ' ').trim();
   // …then drop the echoed list annotation (type, distance) — see above.
   s = stripPoiAnnotation(s);
   if (s.length < 2 || s.length > 80) return undefined;
