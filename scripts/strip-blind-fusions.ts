@@ -23,11 +23,12 @@
  */
 import type Database from 'better-sqlite3';
 import { distM } from '../src/geo/precision';
-import { nameMergeKeys, semanticNameKey } from '../src/geo/offlineMap';
-import { countriesIn, countryContradiction } from './identity-heal';
+import { samePlaceName } from '../src/geo/offlineMap';
 
-const EXACT_RADIUS = 60;      // same translit key
-const SEMANTIC_RADIUS = 120;  // same semantic (translated) key
+// The agreement test is the SAME rule identityHeal uses (samePlaceName: token
+// set within 120m, containment within 40m, same-country embassy within 200m).
+// When this pass and the heal disagree, one undoes the other — they must share
+// exactly one predicate.
 
 export function stripBlindFusions(db: Database.Database): { stripped: number; kept: number } {
   console.log('PHASE B2b: strip blind coordinate fusions (name must agree)');
@@ -51,23 +52,7 @@ export function stripBlindFusions(db: Database.Database): { stripped: number; ke
     const a = anchorByPid.get(r.place_id);
     if (!a) { kept++; continue; } // anchor row gone; identity unverifiable → keep
     const d = distM(r.lat, r.lon, a.lat, a.lon);
-    const rKeys = nameMergeKeys(r.name);
-    const aKeys = nameMergeKeys(a.name);
-    const sameTranslit = aKeys.includes(rKeys[0]);
-    const sameSemantic = rKeys.length > 1 && aKeys.includes(rKeys[1]);
-    if ((sameTranslit && d <= EXACT_RADIUS) || (sameSemantic && d <= SEMANTIC_RADIUS)) {
-      kept++;
-      continue;
-    }
-    // Tier-3 evidence, same as the guarded heal: an EMBASSY row and an
-    // anchor embassy naming the SAME country at any distance are one
-    // institution ("Амбасада на Германија" ↔ "Embassy of the Federal
-    // Republic of Germany", d=0 but different adjective forms). Contradiction
-    // still rejects (Британска амбасада ≠ French Embassy).
-    const rIsEmbassy = /\bembassy\b|ambasada|ambasadi/.test(semanticNameKey(r.name) + ' ' + r.name);
-    const aIsEmbassy = /\bembassy\b|ambasada|ambasadi/.test(semanticNameKey(a.name) + ' ' + a.name);
-    if (rIsEmbassy && aIsEmbassy && !countryContradiction(r.name, a.name)
-        && countriesIn(r.name).size > 0) {
+    if (samePlaceName(r.name, a.name, d).same) {
       kept++;
       continue;
     }

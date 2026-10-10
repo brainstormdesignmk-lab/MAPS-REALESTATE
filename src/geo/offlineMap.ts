@@ -290,6 +290,196 @@ export function nameMergeKeys(s: string): string[] {
   return keys;
 }
 
+// ── BILINGUAL PLACE IDENTITY (one place, many spellings) ────────────────────
+// The same physical place lives in the map up to three times: OSM's Cyrillic
+// name, Google's English name, and whatever the feed enriched. The identity
+// passes used to compare the two keys above by EXACT string equality, so
+// bureaucratic noise ("of the Republic of", "Consular Section of the") and
+// word order split ONE place into two rotation slots — the Embassy bug:
+//   L1 "Embassy of Montenegro"  + maps.google.com/?cid=…   (English, place card)
+//   L2 "Амбасада на Црна Гора" + maps.google.com/?q=…     (Macedonian, raw pin)
+// Same building, twice, two languages, two link forms.
+//
+// The rule below is TOKEN-level and deliberately conservative:
+//   • transliterate + lexicon-map EVERY word (the same tables semanticNameKey uses)
+//   • drop bureaucratic NOISE words — but KEEP DIGITS, so "Бит Пазар 1" can
+//     never equal "Бит Пазар 2" (semanticNameKey strips digits, which is why it
+//     must never be used for identity)
+//   • compare as an UNORDERED SET: "embassy turkey" ≡ "embassy republic turkey"
+//   • qualifiers (residence/consular/section) are KEPT — they mark genuinely
+//     different units of the same institution and gate the embassy tier.
+
+/** Bureaucratic filler that carries no identity. Dropped as tokens. */
+export const IDENTITY_NOISE = new Set([
+  'of', 'the', 'na', 'vo', 'od', 'do', 'kaj', 'sproti', 'de', 'i', 'so', 'za',
+  'and', 'in', 'at', 'republic', 'republika', 'republiki', 'federal', 'federacija',
+  'general', 'br', 'b', 'ul', 'ulica', 'street', 'bulevar', 'boulevard',
+]);
+
+/** Distinctive qualifiers that make two same-country institutions DIFFERENT
+ *  places (an embassy vs its consular section vs its residence). Kept as
+ *  tokens, and used to gate the embassy-uniqueness tier. */
+export const IDENTITY_QUALIFIER = /residence|consular|consulate|section|annex|depot/i;
+
+/** Identity tokens: canonical, noise-free, DIGITS PRESERVED, order ignored. */
+export function identityTokens(name: string): string[] {
+  let t = translitToLatin(name)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (const [from, to] of LEXICON_PHRASES) t = t.split(from).join(to);
+  const out: string[] = [];
+  for (const w of t.split(' ')) {
+    if (!w) continue;
+    const canon = LEXICON_WORDS[w] ?? w;
+    if (!canon || IDENTITY_NOISE.has(canon)) continue;
+    out.push(canon);
+  }
+  return out;
+}
+
+/** Unordered, noise-free identity key (digits kept). */
+export function identityKey(name: string): string {
+  return [...new Set(identityTokens(name))].sort().join(' ');
+}
+
+/** Distance bounds shared by the map build (identity-heal.ts) and the runtime
+ *  dedupe (nearestPois) — one rule, two call sites, so the build and the
+ *  request path can never disagree about what "one place" means. */
+export const IDENTITY_TOKEN_RADIUS = 120;  // same token set (order-insensitive)
+export const IDENTITY_SUBSET_RADIUS = 40;  // one name contained in the other
+export const IDENTITY_EMBASSY_RADIUS = 200; // same country, one in-city embassy
+
+/** Countries our lexicon can recognize in landmark names. Keys are the
+ *  normalized/canonical word forms (post-transliteration, post-lexicon).
+ *  Used by the contradiction guard and the embassy-uniqueness tier. */
+export const IDENTITY_COUNTRIES = new Set([
+  'montenegro', 'macedonia', 'serbia', 'bulgaria', 'greece', 'albania',
+  'germany', 'france', 'italy', 'turkey', 'america', 'usa',
+  'british', 'kingdom', 'kazakhstan', 'spain', 'spanish', 'switzerland',
+  'swedish', 'sweden', 'japan', 'japanese', 'netherlands', 'dutch',
+  'bosnia', 'herzegovina', 'romania', 'romanian', 'russia', 'russian',
+  'croatia', 'croatian', 'czech', 'slovakia', 'slovenia', 'poland',
+  'polish', 'china', 'chinese', 'ukraine', 'ukrainian', 'hungary',
+  'hungarian', 'austria', 'austrian', 'iran', 'qatar', 'kosovo',
+  'hrvatska', 'bugarija', 'nemacka', 'francuska', 'francija', 'italija', 'turska',
+  'srbija', 'grcija', 'spanija', 'madjarska', 'avstrija', 'rusija',
+  'svicarska', 'severna', 'kineska', 'britanska', 'crnogorska',
+  'kazahstan', 'madarska', 'svajcarska', 'poljska', 'cheshka',
+  'slovachka', 'slovenija', 'bosna', 'sad', 'germanija',
+]);
+
+/** Cross-language pairs that normalize differently but denote one country. */
+const IDENTITY_COUNTRY_ALIASES: Array<[string, string[]]> = [
+  ['montenegro', ['crnogorska']],
+  ['british', ['britanska', 'kingdom']],
+  ['france', ['francuska', 'francija']],
+  ['kazakhstan', ['kazahstan']],
+  ['spain', ['spanija']],
+  ['germany', ['nemacka', 'germanija']],
+  ['croatia', ['hrvatska', 'croatian']],
+  ['america', ['usa', 'american', 'sad']],
+  ['united', []],
+];
+
+/** Country tokens named by a place, in their canonical form. */
+export function countriesIn(s: string): Set<string> {
+  const words = new Set(identityTokens(s));
+  const found = new Set<string>();
+  for (const w of words) if (IDENTITY_COUNTRIES.has(w)) found.add(w);
+  for (const [canon, alts] of IDENTITY_COUNTRY_ALIASES) {
+    if (found.has(canon)) for (const a of alts) found.add(a);
+    for (const a of alts) if (found.has(a)) found.add(canon);
+  }
+  return found;
+}
+
+/** True when a and b name contradictory countries (both name a country, and
+ *  the sets are disjoint). Never true when either side names none. */
+export function countryContradiction(nameA: string, nameB: string): boolean {
+  const a = countriesIn(nameA);
+  const b = countriesIn(nameB);
+  if (!a.size || !b.size) return false;
+  for (const w of a) if (b.has(w)) return false;
+  return true;
+}
+
+/** Is the name an embassy/diplomatic mission at all? */
+export const EMBASSY_RE = /\bembassy\b|\bambasada\b|\bambasadi\b|\bambasadi\b|\bemabassy\b/i;
+export function isEmbassyName(name: string): boolean {
+  return EMBASSY_RE.test(semanticNameKey(name)) || EMBASSY_RE.test(name.toLowerCase());
+}
+
+/** Does a name carry a discriminative qualifier (residence/consular/…)? */
+export function hasIdentityQualifier(name: string): boolean {
+  return IDENTITY_QUALIFIER.test(identityTokens(name).join(' ')) || IDENTITY_QUALIFIER.test(name);
+}
+
+export type PlaceAgreementTier = 'token' | 'subset' | 'embassy' | 'none';
+export interface PlaceAgreement { same: boolean; tier: PlaceAgreementTier }
+
+/**
+ * THE single "are these two names the same physical place?" rule.
+ *
+ *   token  — identical token SET (order-insensitive, noise dropped, digits kept)
+ *            within IDENTITY_TOKEN_RADIUS. "Амбасада на Турција" ≡
+ *            "Embassy of Republic of Turkey"; "Амбасада на Република Чешка" ≡
+ *            "Embassy of the Czech Republic"; "Бит Пазар 1" ≠ "Бит Пазар 2".
+ *   subset — one token set contained in the other within IDENTITY_SUBSET_RADIUS,
+ *            the smaller side carrying ≥1 distinctive (≥4-char) token AND the
+ *            two rows standing on OPPOSITE identity sides (exactly one of them
+ *            carries a Google place_id). That is the actual evidence for
+ *            "Рептил" ≡ "Reptil Market br.3 Kisela Voda": Google identified the
+ *            site and the OSM row is its local-script name. It is exactly what
+ *            is MISSING for two un-identified rows that merely share a brand
+ *            ("Kipper" vs "Kipper Market - Butel" = different branches), so
+ *            those stay separate — the branch protection is unchanged.
+ *   embassy— both embassies, same country, same qualifier state, no country
+ *            contradiction, within IDENTITY_EMBASSY_RADIUS. A country has at
+ *            most one main embassy per city; the residence/consular-section
+ *            anchors are excluded unless the row itself is one.
+ *
+ * ``distanceM`` is the distance between the two candidates (NOT to a center).
+ */
+export function samePlaceName(
+  nameA: string,
+  nameB: string,
+  distanceM: number,
+  hasIdentityA = false,
+  hasIdentityB = false,
+): PlaceAgreement {
+  const ta = new Set(identityTokens(nameA));
+  const tb = new Set(identityTokens(nameB));
+  if (ta.size === 0 || tb.size === 0) return { same: false, tier: 'none' };
+
+  const sameSet = ta.size === tb.size && [...ta].every(t => tb.has(t));
+  if (sameSet && distanceM <= IDENTITY_TOKEN_RADIUS) return { same: true, tier: 'token' };
+
+  const subset = [...ta].every(t => tb.has(t)) || [...tb].every(t => ta.has(t));
+  const smaller = ta.size <= tb.size ? ta : tb;
+  const distinctive = [...smaller].some(t => t.length >= 4);
+  const exclusiveIdentity = hasIdentityA !== hasIdentityB;
+  // The qualifier guard applies here too: "Embassy of Republic of Turkey"
+  // contains "Turkish Embassy (Residence)", but the residence is a DIFFERENT
+  // building — containment must never fuse an institution with its
+  // consular section / residence.
+  const qualifierAgrees = hasIdentityQualifier(nameA) === hasIdentityQualifier(nameB);
+  if (subset && distinctive && exclusiveIdentity && qualifierAgrees
+      && distanceM <= IDENTITY_SUBSET_RADIUS) {
+    return { same: true, tier: 'subset' };
+  }
+
+  if (isEmbassyName(nameA) && isEmbassyName(nameB)
+      && !countryContradiction(nameA, nameB)
+      && hasIdentityQualifier(nameA) === hasIdentityQualifier(nameB)) {
+    const shared = [...countriesIn(nameA)].some(c => countriesIn(nameB).has(c));
+    if (shared && distanceM <= IDENTITY_EMBASSY_RADIUS) return { same: true, tier: 'embassy' };
+  }
+
+  return { same: false, tier: 'none' };
+}
+
 /** First house-number token in a raw address line.
  *  "Јане Сандански 25 - 17" → "25", "Бр.134" → "134", "ул. Македонија" → "".
  *  Shared by geocodeAddress() and resolvePropertyOffline(). */
@@ -446,6 +636,60 @@ const PERMANENCE: Record<string, number> = {
   parking: 1.0, // generic parking, not a named garage
 };
 
+const CYRILLIC_RE = /[\u0400-\u04FF]/;
+/** Do we prefer this spelling in a client-facing answer? The agency speaks
+ *  Macedonian, so a Cyrillic name beats its Latin twin ("Амбасада на Црна
+ *  Гора" over "Embassy of Montenegro"). */
+export function prefersLocalScript(name: string): boolean {
+  return CYRILLIC_RE.test(name);
+}
+
+/** A POI row after the same-place collapse in nearestPois(). */
+export interface MergedPoi {
+  name: string; type: string; lat: number; lon: number; dist: number;
+  source?: string; place_url?: string; place_id?: string;
+  review_count?: number | null; rating?: number | null; closed?: number | null;
+}
+
+/** Merge two rows the shared identity rule has proven to be ONE place.
+ *  Invariants (this is what fixes the "English name + raw pin" answers):
+ *    • the LOCAL-SCRIPT name survives (Cyrillic over Latin)
+ *    • the Google identity survives (place_id from whichever side has it)
+ *    • Google's coordinates win (verified), its rating/reviews ride along
+ *    • the better type wins — a rank-0 Google row ("Corporate office",
+ *      "Foreign consulate") must NOT demote a diplomatic row to type 0, but
+ *      it still donates its place_id (Turkey: ?q= → ?cid=)
+ *    • the distance is recomputed against the coordinates actually served */
+export function mergeSamePlace(keep: MergedPoi, other: MergedPoi, centerLat: number, centerLon: number): MergedPoi {
+  const kCyr = prefersLocalScript(keep.name), oCyr = prefersLocalScript(other.name);
+  const name = kCyr && !oCyr ? keep.name : oCyr && !kCyr ? other.name : keep.name;
+  const identity = keep.place_id ? keep : other.place_id ? other : null;
+  const googleSide = keep.source === 'google' ? keep : other.source === 'google' ? other : null;
+  const type = typeRank(other.type) > typeRank(keep.type) ? other.type : keep.type;
+  const lat = googleSide?.lat ?? keep.lat;
+  const lon = googleSide?.lon ?? keep.lon;
+  return {
+    name,
+    type,
+    lat,
+    lon,
+    dist: distM(centerLat, centerLon, lat, lon),
+    source: identity?.source ?? keep.source,
+    place_url: keep.place_url ?? other.place_url,
+    place_id: identity?.place_id ?? keep.place_id ?? other.place_id ?? null as unknown as string | undefined,
+    review_count: keep.review_count ?? other.review_count ?? null,
+    rating: keep.rating ?? other.rating ?? null,
+    closed: keep.closed ?? other.closed ?? 0,
+  };
+}
+
+/** Same-place test for two POI rows: Google's identity when both carry one,
+ *  otherwise the shared bilingual name rule at the real row-to-row distance. */
+export function samePlacePoi(a: MergedPoi, b: MergedPoi): PlaceAgreement {
+  if (a.place_id && b.place_id && a.place_id === b.place_id) return { same: true, tier: 'token' };
+  return samePlaceName(a.name, b.name, distM(a.lat, a.lon, b.lat, b.lon), !!a.place_id, !!b.place_id);
+}
+
 export class OfflineMapStore {
   private db: Database.Database | null = null;
   /** The map file path — learnAddress() needs it to open a read-write conn. */
@@ -549,31 +793,41 @@ export class OfflineMapStore {
       const base = Math.log10((r.review_count ?? 0) + 1);
       return r.source === 'google' ? base + 0.01 : base;
     };
+    // PROXIMITY OVERRIDE (the EB 94 lesson). Distance used to be the LAST
+    // key, so a named bus stop 145m away won over the supermarket 53m away and
+    // the client was told "во близина на ШАМПИОНЧЕ-КОН ЦЕНТАР" for a property
+    // whose nearest public place is Рептил. A place WITHIN THE NEAR BAND
+    // (75m) now outranks everything farther regardless of type — a landmark
+    // you can see from the door is the honest answer. `typeRank >= 1` keeps
+    // unusable rows (unknown types, bare "yes" buildings) out of the override
+    // so a kiosk can never hijack the first slot.
+    const NEAR_OVERRIDE_M = 75;
+    const nearBand = (r: { dist: number; type: string }): number =>
+      r.dist <= NEAR_OVERRIDE_M && typeRank(r.type) >= 1 ? 0 : 1;
     const ranked = clean.sort((a, b) =>
-      (typeRank(b.type) - typeRank(a.type))
+      (nearBand(a) - nearBand(b))
+      || (typeRank(b.type) - typeRank(a.type))
       || (prominence(b) - prominence(a))
       || (a.dist - b.dist));
 
-    // Dedupe pass — Cyrillic/Latin + case/punctuation tolerant (NOT name
-    // variants: "Kipper" vs "Kipper Market - Butel" are different branches
-    // and must never merge). For a same-place pair within 30m, Google wins
-    // the anchor (verified coordinates); the OSM row is dropped.
-    // Identity tier 1: same non-null place_id = THE SAME physical place no
-    // matter how the name is spelled (official vs feed alias) or how far the
-    // coordinates disagree — this is what keeps two spellings of one embassy
-    // from occupying two of the three rotation slots. No distance bound:
-    // place_id equality is stronger evidence than any coordinate.
-    const merged: Array<{ name: string; type: string; lat: number; lon: number; dist: number; source?: string; place_url?: string; place_id?: string; review_count?: number | null; rating?: number | null; closed?: number | null }> = [];
+    // SAME-PLACE COLLAPSE — the ONE bilingual identity rule (samePlacePoi),
+    // shared with the map build (scripts/identity-heal.ts), so the request
+    // path can never disagree with what the build merged:
+    //   • identical non-null place_id — the same physical place no matter how
+    //     the name is spelled and no matter the coordinate disagreement
+    //   • identical token set (order-insensitive, noise dropped, digits kept)
+    //     within 120m — "Embassy of Montenegro" ≡ "Амбасада на Црна Гора"
+    //   • containment within 40m — "Рептил" ≡ "Reptil Market br.3 Kisela Voda"
+    //   • same-country embassies with the same qualifier state, within 200m
+    // The merge keeps the CyriLLIC name AND Google's identity, so a twin can
+    // no longer occupy two rotation slots ("Embassy of Montenegro" + ?cid,
+    // then "Амбасада на Црна Гора" + ?q — one building, twice).
+    const merged: MergedPoi[] = [];
     for (const poi of ranked) {
-      const dup = merged.find(g =>
-        (!!poi.place_id && !!g.place_id && poi.place_id === g.place_id) ||
-        (Math.abs(g.dist - poi.dist) < 30 && normName(g.name) === normName(poi.name)));
-      if (dup) {
-        if (poi.source === 'google' && dup.source !== 'google') {
-          // Google wins the anchor; replace the dup in place
-          merged[merged.indexOf(dup)] = poi;
-        }
-        continue; // else keep existing (same-source or google already present)
+      const dupIdx = merged.findIndex(g => samePlacePoi(g, poi).same);
+      if (dupIdx >= 0) {
+        merged[dupIdx] = mergeSamePlace(merged[dupIdx], poi, lat, lon);
+        continue;
       }
       merged.push(poi);
     }

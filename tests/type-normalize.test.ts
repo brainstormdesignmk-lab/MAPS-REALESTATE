@@ -65,10 +65,12 @@ test('a NAMED residential complex survives the junk filter (Beverly Hills class)
   store.close();
 });
 
-test('a mall at 200m outranks a cafe at 50m in nearestPois (preference before distance)', () => {
+test('NEAR BAND wins: a place at 50m outranks a mall at 200m (the EB 94 fix)', () => {
   const dbPath = tmpDb();
-  // cafe is 50m away, mall is 200m away — with pure-distance sorting the cafe
-  // would win; typeRank must put the mall first.
+  // The 22:17 transcript: EB 94 sits next to a supermarket 53m away and the
+  // rotation served a named bus stop 145m away, because typeRank sorted BEFORE
+  // distance. Within the 75m band distance now wins — the honest answer for a
+  // landmark the client can see from the door.
   writeMap(dbPath, [
     { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },   // ~50m
     { name: 'Рамстор Мол', type: 'mall', lat: 41.9987, lon: 21.4308 }, // ~200m
@@ -76,8 +78,23 @@ test('a mall at 200m outranks a cafe at 50m in nearestPois (preference before di
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.9966, 21.4302, 500, 10);
   assert.ok(pois.length >= 2, `expected both POIs, got ${pois.length}`);
-  assert.equal(pois[0].name, 'Рамстор Мол', 'mall must outrank a closer cafe');
-  assert.equal(pois[1].name, 'Кафе Миро');
+  assert.equal(pois[0].name, 'Кафе Миро', 'a 47m place must outrank a 238m mall');
+  assert.equal(pois[1].name, 'Рамстор Мол');
+  store.close();
+});
+
+test('OUTSIDE the near band typeRank still decides (preference before distance)', () => {
+  const dbPath = tmpDb();
+  // Both beyond 75m: the mall must win again, or the band would have turned
+  // the ladder into plain nearest-first.
+  writeMap(dbPath, [
+    { name: 'Кафе Далеку', type: 'cafe', lat: 41.99800, lon: 21.4302 }, // ~111m, rank 1
+    { name: 'Рамстор Мол', type: 'mall', lat: 41.99870, lon: 21.4308 }, // ~196m, rank 5
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99700, 21.4302, 500, 10);
+  assert.equal(pois[0].name, 'Рамстор Мол', 'outside the band typeRank decides');
+  assert.equal(pois[1].name, 'Кафе Далеку');
   store.close();
 });
 

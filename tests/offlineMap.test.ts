@@ -44,10 +44,11 @@ test('nearestPois: nearest first, radius respected, limit honored', () => {
 
   const near = store.nearestPois(42.0, 21.43, 1000, 10);
   assert.equal(near.length, 2); // City Mall (>1.4km) is outside the 1000m ring
-  // TypeRank ranking: institutional landmarks first, then distance — the
-  // university (rank 3) outranks the cafe (rank 1) despite being farther.
-  assert.equal(near[0].name, 'Градежен факултет');
-  assert.equal(near[1].name, 'Кафе бар Ван Гог');
+  // Ladder (2026-10): the NEAR BAND first — the cafe sits on the centre, so it
+  // outranks the university even though institutions rank higher; outside the
+  // band typeRank still decides (see the mall-vs-cafe test in type-normalize).
+  assert.equal(near[0].name, 'Кафе бар Ван Гог');
+  assert.equal(near[1].name, 'Градежен факултет');
 
   // 100m ring = only the cafe (the "rings" are just distances, one query)
   const tight = store.nearestPois(42.0, 21.43, 100, 10);

@@ -186,14 +186,43 @@ export function cacheLandmark(
 
 let _landmarkStoreInstance: LandmarkStore | undefined;
 
-// Search center: property row ONLY. geocodeAddress is called NOWHERE in the request path.
-export function resolveSearchCenter(p: PropertyRow): { lat: number; lon: number; trusted: boolean } {
+// Search center: the property row's OWN coordinates, with ONE cross-check.
+// geocodeAddress is called NOWHERE in the request path — but the map's own
+// ADDRESS resolution is, because it is local, offline and trusted
+// (building/interpolated), and the feed's geocode is not always right.
+//
+// THE EB 94 LESSON (2026-10-10): the feed held lat/lon a `google_cached`
+// geocode had put 76m away from the real building, while the map's own
+// resolution of "Тоне Томшиќ 25" sat 21m from it. The rotation ran from the
+// wrong point and served a bus stop 145m out. A mismatch of more than
+// CENTER_MISMATCH_M now prefers the map's point (and nearbyLandmarks queues the
+// row so the feed itself gets repaired by the monthly drain).
+/** Metres of disagreement above which the map's own address resolution wins. */
+export const CENTER_MISMATCH_M = 50;
+
+export interface SearchCenter {
+  lat: number; lon: number; trusted: boolean;
+  /** Where the point came from — 'map' means the cross-check overrode the feed. */
+  source: 'stored' | 'map' | 'geocode' | 'none';
+  /** Distance in metres between the stored point and the map's point. */
+  mismatchM?: number;
+}
+
+export function resolveSearchCenter(p: PropertyRow): SearchCenter {
   if (p.lat && p.lon && p.geo_source !== 'osm_low_confidence') {
-    return { lat: p.lat, lon: p.lon, trusted: true };
+    const stored = { lat: p.lat, lon: p.lon };
+    const map = _offlineMapRef?.resolvePropertyOffline(p.address ?? '');
+    if (map?.trusted && map.lat != null && map.lon != null) {
+      const d = _distM(stored.lat, stored.lon, map.lat, map.lon);
+      if (d > CENTER_MISMATCH_M) {
+        return { lat: map.lat, lon: map.lon, trusted: true, source: 'map', mismatchM: d };
+      }
+    }
+    return { lat: stored.lat, lon: stored.lon, trusted: true, source: 'stored' };
   }
   const osm = _offlineMapRef?.geocodeAddress(p.address ?? '');
-  if (osm) return { lat: osm.lat, lon: osm.lon, trusted: false };
-  return { lat: 0, lon: 0, trusted: false };
+  if (osm) return { lat: osm.lat, lon: osm.lon, trusted: false, source: 'geocode' };
+  return { lat: 0, lon: 0, trusted: false, source: 'none' };
 }
 
 /**
@@ -305,6 +334,29 @@ function publicPlace(l: Landmark | undefined): Landmark | undefined {
   return l;
 }
 
+/** Strip OUR OWN list annotation from an LLM answer.
+ *
+ *  The pick prompt hands the model lines like
+ *    - AgroTehnA - Head Office (Shopping mall, 257м)
+ *  and models regularly echo the whole line back instead of just the name.
+ *  Truncated answers lose the closing paren, so it must be stripped balanced
+ *  OR dangling — the real 2026-10-10 feed row (EB 94, ANA's enrichment) was
+ *  literally `AgroTehnA - Head Office (Shopping mall, 257м` — the client would
+ *  have read a name that is half annotation. The parenthetical is metadata
+ *  (type, distance) that the runner re-attaches from the POI table, never part
+ *  of a landmark name. */
+export function stripPoiAnnotation(s: string): string {
+  return s
+    // The annotation ALWAYS ends in a number: "(Shopping mall, 257м)" — with or
+    // without the closing paren (truncated answers) — or a bare " 257м" tail.
+    // A name's own parenthetical ("… (привремено затворен)") has no digit and
+    // is deliberately left alone.
+    .replace(/\s*\([^()]*,\s*\d+(?:[.,]\d+)?\s*(?:м|m|km)?\s*\)?/giu, '')
+    .replace(/\s+\d+(?:[.,]\d+)?\s*(?:м|m|km)\s*$/giu, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export function sanitizeLandmarkAnswer(raw: string, street?: string): string | undefined {
   let s = raw.trim().split(/\n/)[0].trim(); // the LLM's first line only
   s = s
@@ -313,6 +365,8 @@ export function sanitizeLandmarkAnswer(raw: string, street?: string): string | u
     .replace(/[„“”«»"'`\[\]()\-*_]+$/, '') // trailing decoration
     .replace(/\s+/g, ' ')
     .trim();
+  // …then drop the echoed list annotation (type, distance) — see above.
+  s = stripPoiAnnotation(s);
   if (s.length < 2 || s.length > 80) return undefined;
   // The exact street must never appear in the landmark.
   if (street) {
@@ -526,6 +580,19 @@ export class LandmarkService {
    *  Client-facing claims are capped at 500m. */
   nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
     const center = resolveSearchCenter(p);
+
+    // CENTRE MISMATCH → queue the property so the FEED gets repaired, not just
+    // this answer. The monthly drain re-resolves it from the local map first
+    // (free) and only falls back to a budget-guarded SerpApi geocode.
+    if (center.source === 'map' && (center.mismatchM ?? 0) > CENTER_MISMATCH_M && p.id != null) {
+      try {
+        this.db.db.prepare(
+          `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
+        ).run(p.id, 'center_mismatch', new Date().toISOString());
+      } catch {}
+      try { dbgLog(
+        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-CENTER-MISMATCH stored=${Math.round(center.mismatchM ?? 0)}m off → using the map's own address point, queued\n`); } catch {}
+    }
 
     if (!center.trusted) {
       // GRACE DEGRADATION (the 20:51 bug): osm_low_confidence means the

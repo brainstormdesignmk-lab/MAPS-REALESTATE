@@ -6,18 +6,27 @@
  * No human overrides for the common case; the override file stays as the
  * exception drawer only.
  *
- * Name matching is BILINGUAL — three tiers, safest first:
+ * Name matching is BILINGUAL — three tiers, safest first (all three now use
+ * the engine's ONE rule, samePlaceName() in src/geo/offlineMap.ts, so the
+ * build and the runtime dedupe can never disagree):
  *
- *   1. Transliteration (Еурофарм = Eurofarm) — same script converted, tight
- *      50m bound. Never merges different words.
- *   2. Semantic lexicon (Амбасада на Црна Гора = Embassy of Montenegro) —
- *      TRANSLATION, which script conversion alone cannot bridge. 100m bound.
+ *   1+2. Identity token set — transliteration AND the semantic lexicon are
+ *      applied word-by-word, bureaucratic noise (of/the/Republic…) is dropped
+ *      and DIGITS ARE KEPT, then the sets are compared UNORDERED. Fixed 120m
+ *      bound. This is what bridges single spellings, translations and the
+ *      bureaucratic padding that used to defeat EXACT key equality:
+ *        "Амбасада на Турција"  ≡ "Embassy of Republic of Turkey"
+ *        "Амбасада на Република Чешка" ≡ "Embassy of the Czech Republic"
+ *      …while "Бит Пазар 1" ≠ "Бит Пазар 2" (digits survive).
+ *   2b. Containment within 40m — "Рептил" ≡ "Reptil Market br.3 Kisela Voda"
+ *      (the same shop with Google's fuller name) without fusing chain
+ *      branches kilometres apart.
  *   3. Embassy UNIQUENESS (Амбасада на Франција ≡ Embassy of France) — a
- *      country has at most ONE embassy per city. If the semantic keys name
- *      the same country and the anchor is the only in-city embassy of that
- *      country, adopt it regardless of distance. This is how the France row
- *      (sitting at the UK embassy's coords) still finds its true anchor
- *      620m away.
+ *      country has at most ONE main embassy per city. This is how the France
+ *      row (sitting at the UK embassy's coords) still finds its true anchor
+ *      620m away. Residence / consular-section anchors are excluded unless
+ *      the row itself is one — that is what un-blocked Czech and Turkey,
+ *      whose consulate/residence rows used to make the country "ambiguous".
  *
  * SAFETY GUARDS (the fusions this fixes were born from their absence):
  *   - Country contradiction: a row naming country X is NEVER healed by an
@@ -29,74 +38,24 @@
 
 import type Database from 'better-sqlite3';
 import { distM } from '../src/geo/precision';
-import { nameMergeKeys, normName, semanticNameKey } from '../src/geo/offlineMap';
+import {
+  countriesIn, countryContradiction, hasIdentityQualifier, isEmbassyName, samePlaceName,
+} from '../src/geo/offlineMap';
+
+// The country lexicon, the contradiction guard and the same-place rule now live
+// in the ENGINE (src/geo/offlineMap.ts) so the map build and the runtime dedupe
+// cannot drift apart. Re-exported here for strip-blind-fusions.ts.
+export { countriesIn, countryContradiction } from '../src/geo/offlineMap';
 
 /** Bounding box of the Skopje urban area (the "city" for uniqueness rules). */
 const SKOPJE_BBOX = { latMin: 41.95, latMax: 42.05, lonMin: 21.35, lonMax: 21.50 };
 
-const EXACT_RADIUS = 50;      // tier 1: same-script spellings
-const SEMANTIC_RADIUS = 100;  // tier 2: translated spellings
-
-/**
- * Countries our lexicon can recognize in landmark names. Used for the
- * contradiction guard: heals must never bridge two different countries.
- * Keys/values are the normalized words that appear after transliteration.
- */
-const COUNTRIES = new Set([
-  'montenegro', 'macedonia', 'serbia', 'bulgaria', 'greece', 'albania',
-  'germany', 'france', 'italy', 'turkey', 'america', 'usa',
-  'british', 'kingdom', 'kazakhstan', 'spain', 'spanish', 'switzerland',
-  'swedish', 'sweden', 'japan', 'japanese', 'netherlands', 'dutch',
-  'bosnia', 'herzegovina', 'romania', 'romanian', 'russia', 'russian',
-  'croatia', 'croatian', 'czech', 'slovakia', 'slovenia', 'poland',
-  'polish', 'china', 'chinese', 'ukraine', 'ukrainian', 'hungary',
-  'hungarian', 'austria', 'austrian', 'iran', 'qatar', 'kosovo',
-  'hrvatska', 'bugarija', 'nemacka', 'francuska', 'francija', 'italija', 'turska',
-  'srbija', 'grcija', 'spanija', 'madjarska', 'avstrija', 'rusija',
-  'svicarska', 'severna', 'kineska', 'britanska', 'crnogorska',
-  'kazahstan', 'madarska', 'svajcarska', 'poljska', 'cheshka',
-  'slovachka', 'slovenija', 'bosna', 'sad', 'germanija',
-]);
-
-/** Countries, in their Macedonian-name forms, mapped to the canonical token
- *  both languages normalize to via the lexicon. Extracted from a name by
- *  checking its semantic key against known country tokens. Exported for the
- *  strip pass, which must accept the same tier-3 evidence as this heal. */
-export function countriesIn(s: string): Set<string> {
-  const key = semanticNameKey(s);
-  const words = new Set(key.split(/\s+/));
-  const found = new Set<string>();
-  for (const w of words) {
-    if (COUNTRIES.has(w)) found.add(w);
-  }
-  // Cross-language pairs that normalize differently but denote one country:
-  const ALIASES: Array<[string, string[]]> = [
-    ['montenegro', ['crnogorska']],
-    ['british', ['britanska', 'kingdom']],
-    ['france', ['francuska', 'francija']],
-    ['kazakhstan', ['kazahstan']],
-    ['spain', ['spanija']],
-    ['germany', ['nemacka', 'germanija']],
-    ['croatia', ['hrvatska', 'croatian']],
-    ['america', ['usa', 'american', 'sad']],
-    ['united', []],
-  ];
-  for (const [canon, alts] of ALIASES) {
-    if (found.has(canon)) for (const a of alts) found.add(a);
-    for (const a of alts) if (found.has(a)) found.add(canon);
-  }
-  return found;
-}
-
-/** True when a and b name contradictory countries (both have country words,
- *  and the sets are disjoint). Never true when either side names none. */
-export function countryContradiction(nameA: string, nameB: string): boolean {
-  const a = countriesIn(nameA);
-  const b = countriesIn(nameB);
-  if (!a.size || !b.size) return false;
-  for (const w of a) if (b.has(w)) return false;
-  return true;
-}
+// Same-script / translated spellings now use the engine's shared identity rule
+// (identity token set within 120m, containment within 40m, same-country
+// embassy within 200m) — see samePlaceName() in src/geo/offlineMap.ts. The old
+// 50m/100m EXACT-string tiers could never bridge "Амбасада на Турција" with
+// "Embassy of Republic of Turkey" (extra words) or "…Република Чешка" with
+// "…the Czech Republic" (word order), which is exactly the Embassy bug.
 
 export interface HealResult {
   healed: number;
@@ -133,7 +92,7 @@ export function identityHeal(db: Database.Database): HealResult {
   }
 
   // In-city embassy anchors by country token — for tier 3 uniqueness.
-  const embassyAnchors = anchors.filter(a => /\bembassy|ambasada|ambasad/i.test(semanticNameKey(a.name) + ' ' + a.name));
+  const embassyAnchors = anchors.filter(a => isEmbassyName(a.name));
   const embassiesByCountry = new Map<string, typeof embassyAnchors>();
   for (const a of embassyAnchors) {
     if (a.lat < SKOPJE_BBOX.latMin || a.lat > SKOPJE_BBOX.latMax) continue;
@@ -202,26 +161,35 @@ export function identityHeal(db: Database.Database): HealResult {
   ).all() as Array<{ rowid: number; name: string; lat: number; lon: number; place_id: string | null }>;
 
   for (const row of rows) {
-    const rowKeys = nameMergeKeys(row.name);
-    const rowKeySet = new Set(rowKeys);
     const rowCountries = countriesIn(row.name);
 
-    // ---- Tier 3: embassy uniqueness (in-city, same country, unambiguous) --
+    // ---- Tier 3: embassy uniqueness (in-city, same country, ONE plausible) -
+    // A country has at most ONE main embassy per city. The rule used to demand
+    // EXACTLY one anchor of that country and silently skipped otherwise — and
+    // "otherwise" is the common case: Czech had 2 (embassy + consular
+    // section), Turkey had 2 (embassy + residence), so both stayed un-merged
+    // and the rotation served one building under two names and two link forms.
+    // Now the residence/consular-section anchors are excluded unless the ROW
+    // is one of those units; if exactly one plausible candidate remains, it is
+    // adopted. Still ambiguity-safe: two plausible candidates → honest unknown.
     let anchor: AnchorRow | null = null;
-    if (/\bembassy\b|ambasada|ambasadi|embassies/.test(semanticNameKey(row.name) + ' ' + normName(row.name))) {
+    if (isEmbassyName(row.name)) {
+      const rowQualified = hasIdentityQualifier(row.name);
       for (const c of rowCountries) {
-        const cands = embassiesByCountry.get(c);
-        if (!cands || cands.length !== 1) continue; // ambiguous or unknown → skip
-        const cand = cands[0];
-        if (countryContradiction(row.name, cand.name)) continue;
-        anchor = cand;
+        const cands = (embassiesByCountry.get(c) ?? [])
+          .filter(a => hasIdentityQualifier(a.name) === rowQualified);
+        if (cands.length !== 1) continue;
+        if (countryContradiction(row.name, cands[0].name)) continue;
+        anchor = cands[0];
         break;
       }
     }
 
-    // ---- Tiers 1+2: proximity + name agreement ----------------------------
+    // ---- Tiers 1+2: proximity + (bilingual) name agreement ----------------
+    // The ONE shared rule: identity token set within 120m, containment within
+    // 40m, same-country embassy within 200m. No more exact-string comparison.
     if (!anchor) {
-      // bbox ~±165m around the row covers both proximity radii
+      // bbox ~±165m around the row covers every proximity bound below
       const cands = db.prepare(
         `SELECT rowid, name, lat, lon, place_id, review_count, rating, plus_code,
                 phone, website, price_level, types, place_url FROM pois
@@ -233,12 +201,11 @@ export function identityHeal(db: Database.Database): HealResult {
       for (const a of cands) {
         if (countryContradiction(row.name, a.name)) continue; // GUARD
         const d = distM(row.lat, row.lon, a.lat, a.lon);
-        const aKeys = nameMergeKeys(a.name);
-        const aKeySet = new Set(aKeys);
-        const sameTranslit = aKeySet.has(rowKeys[0]);
-        const sameSemantic = rowKeys.length > 1 && aKeySet.has(rowKeys[1]);
-        const ok = sameTranslit ? d <= EXACT_RADIUS : sameSemantic && d <= SEMANTIC_RADIUS;
-        if (!ok || d >= bestD) continue;
+        // hasIdentity: the ROW is un-identified by construction (the pass only
+        // walks rows with no place_id) and every candidate anchor carries one —
+        // that asymmetry is what licenses the containment tier.
+        if (!samePlaceName(row.name, a.name, d, false, true).same) continue;
+        if (d >= bestD) continue;
         bestD = d;
         anchor = a;
       }

@@ -31,7 +31,7 @@ test('translitToLatin covers the full Cyrillic alphabet', () => {
   assert.equal(translitToLatin('Жена'), 'zhena');   // ж→zh
 });
 
-test('Google row within 30m of OSM row with equal normName → Google wins the output', () => {
+test('same place in two scripts: ONE POI, Google\'s identity + the LOCAL-SCRIPT name', () => {
   const dbPath = tmpDb();
   // Same physical place: OSM Cyrillic + Google Latin, ~10m apart.
   writeMap(dbPath, [
@@ -41,7 +41,15 @@ test('Google row within 30m of OSM row with equal normName → Google wins the o
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.99705, 21.43005, 500, 10);
   assert.equal(pois.length, 1, `expected exactly 1 deduped POI, got ${JSON.stringify(pois)}`);
-  assert.equal(pois[0].name, 'Eurofarm', 'Google row must win the dedupe anchor');
+  // The agency speaks Macedonian: the Cyrillic name is what the client reads,
+  // while Google's coordinates/rating ride along (asserted below). Until the
+  // 2026-10 Embassy fix the Google row REPLACED the OSM row, so the answer came
+  // back in English ("во близина на Embassy of Montenegro") and, when the two
+  // rows disagreed by more than the old 30m same-name window, the SAME place
+  // took two of the three rotation slots.
+  assert.equal(pois[0].name, 'Еурофарм', 'the local-script name must survive the merge');
+  assert.equal(pois[0].lat, 41.99710, 'Google\'s verified coordinates win');
+  assert.equal(pois[0].lon, 21.43010);
   store.close();
 });
 
@@ -68,10 +76,11 @@ test('nearest POIs capped at limit, preference-ranked', () => {
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.9966, 21.4302, 500, 3);
   assert.equal(pois.length, 3, 'capped at limit=3');
-  // preference order: mall (5) > pharmacy (3) > park (2) > cafe (1)
-  assert.equal(pois[0].name, 'Рамстор Мол');
-  assert.equal(pois[1].name, 'Аптека 24');
-  assert.equal(pois[2].name, 'Парк Градски');
+  // Ladder (2026-10): the NEAR BAND (≤75m) wins first — a place you can see
+  // from the door beats a famous one 200m away — then typeRank, then distance.
+  assert.equal(pois[0].name, 'Кафе Миро', 'the 47m cafe outranks the 238m mall');
+  assert.equal(pois[1].name, 'Рамстор Мол');
+  assert.equal(pois[2].name, 'Аптека 24');
   store.close();
 });
 test('same place_id merges ACROSS names and distances (embassy alias regression)', () => {

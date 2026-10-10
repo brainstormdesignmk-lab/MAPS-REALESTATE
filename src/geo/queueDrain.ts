@@ -80,6 +80,9 @@ export interface DrainResult {
   processed: number;
   /** Properties upgraded to geo_source='google_cached' (bbox-validated). */
   googleUpgraded: number;
+  /** Properties upgraded to a map-trusted point (osm_building / osm_interpolated
+   *  / osm_street_anchor) — resolved FREE from skopje-pois.db, zero SerpApi. */
+  offlineUpgraded: number;
   /** Properties whose landmark was (re)cached from the refreshed POI table. */
   landmarkCached: number;
   /** Streets+numbers the map LEARNED from Google geocodes (the self-learning
@@ -94,7 +97,7 @@ export interface DrainResult {
 
 export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
   const { db, offlineMap, getProperty, updatePropertyGeo, geocode, searchesLeft } = deps;
-  const res: DrainResult = { processed: 0, googleUpgraded: 0, landmarkCached: 0, mapLearned: 0, budgetStopped: 0, leftInQueue: 0 };
+  const res: DrainResult = { processed: 0, googleUpgraded: 0, offlineUpgraded: 0, landmarkCached: 0, mapLearned: 0, budgetStopped: 0, leftInQueue: 0 };
 
   const rows = db.db.prepare(
     `SELECT property_id, reason FROM geo_reresolve_queue ORDER BY property_id`
@@ -108,13 +111,6 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
   const svc = new LandmarkService(db, { offlineMap });
 
   for (const row of rows) {
-    if (searchesLeft() < BUDGET_STOP) {
-      // Budget exhausted mid-drain — leave this and every later row queued.
-      // The caller logs and exits cleanly; next month's run picks them up.
-      res.budgetStopped++;
-      continue;
-    }
-
     const prop = await getProperty(row.property_id);
     if (!prop) {
       // Orphan queue row (property deleted upstream) — drop it, don't loop.
@@ -127,10 +123,41 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
     let lon: number | null = prop.lon ?? null;
     let geoSource: string | null = prop.geo_source ?? null;
 
-    // Step 2 — no trusted center: ONE budget-guarded geocode.
-    const needsGeo = lat == null || lon == null || geoSource === 'osm_low_confidence';
+    // Step 2 — no trusted center (or a stored point the rotation proved wrong):
+    // resolve it. The LOCAL MAP goes first, and only then SerpApi.
+    //
+    // WHY THE ORDER MATTERS (EB 94, 2026-10-10): the feed carried a
+    // `google_cached` point 76m from the real building while the map already
+    // knew "Тоне Томшиќ 25" within 21m. Paying a SerpApi search to repair a
+    // coordinate the map can produce for free — and offline — was pure waste,
+    // and with the budget gone the repair never happened at all.
+    const mismatch = row.reason === 'center_mismatch';
+    const needsGeo = mismatch || lat == null || lon == null || geoSource === 'osm_low_confidence';
     const hasAddress = !!prop.address && prop.address.trim().length >= 3;
     if (needsGeo && hasAddress) {
+      // 2a — FREE: the map's own address resolution (building → interpolated
+      // → Google-verified street anchor). Trusted points only; a street
+      // centroid guess is never written to the feed.
+      const local = offlineMap.resolvePropertyOffline(prop.address!);
+      if (local.trusted && local.lat != null && local.lon != null && insideBbox(local.lat, local.lon)) {
+        lat = local.lat;
+        lon = local.lon;
+        geoSource = local.source;
+        await updatePropertyGeo(row.property_id, {
+          lat, lon,
+          geo_source: local.source,
+          geocoded_at: new Date().toISOString(),
+        });
+        res.offlineUpgraded++;
+        try { dbgLog(`[${new Date().toISOString()}] CENTER-OFFLINE "${prop.address}" → (${lat},${lon}) [${local.source}]\n`); } catch {}
+      } else {
+      // 2b — PAID: ONE budget-guarded SerpApi geocode.
+      if (searchesLeft() < BUDGET_STOP) {
+        // Budget exhausted mid-drain — leave this and every later row queued.
+        // The caller logs and exits cleanly; next month's run picks them up.
+        res.budgetStopped++;
+        continue;
+      }
       const geo = await geocode(prop.address!);
       if (geo && insideBbox(geo.lat, geo.lon)) {
         lat = geo.lat;
@@ -154,6 +181,13 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
       }
       // Outside the bbox or a geocode miss → the row STAYS osm_low_confidence.
       // Never write an unvalidated coordinate, never claim google_cached.
+      }
+    }
+    if (needsGeo && !hasAddress) {
+      // Nothing to resolve from — never loop, never invent.
+      deleteRow.run(row.property_id);
+      res.processed++;
+      continue;
     }
 
     // Step 3 — re-resolve the landmark OFFLINE against the refreshed merged
