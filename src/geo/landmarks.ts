@@ -212,7 +212,18 @@ export function resolveSearchCenter(p: PropertyRow): SearchCenter {
   if (p.lat && p.lon && p.geo_source !== 'osm_low_confidence') {
     const stored = { lat: p.lat, lon: p.lon };
     const map = _offlineMapRef?.resolvePropertyOffline(p.address ?? '');
-    if (map?.trusted && map.lat != null && map.lon != null) {
+    // ONLY A BUILDING-LEVEL MATCH MAY OUTRANK AN EXISTING TRUSTED PIN.
+    // 'osm_street_anchor' is a Google-verified STREET CENTROID: the resolver
+    // reaches it only after the exact-building AND interpolation stages both
+    // failed, so it is street-granularity by construction — it cannot be the
+    // more precise answer for an address the feed already resolved to a point.
+    // Letting it win inverted the trust order (the EB 62 case: "ТЦ ОЛИМПИКО",
+    // Тафталиджe was served from an anchor 2.2 km away while the row's own pin
+    // sat ~246 m from the mall, per the agency's own address-overrides file).
+    // The anchor still serves as the FALLBACK in the branch below, where there
+    // is no trusted pin for it to outrank.
+    const buildingLevel = map?.source === 'osm_building' || map?.source === 'osm_interpolated';
+    if (map?.trusted && map.lat != null && map.lon != null && buildingLevel) {
       const d = _distM(stored.lat, stored.lon, map.lat, map.lon);
       if (d > CENTER_MISMATCH_M) {
         return { lat: map.lat, lon: map.lon, trusted: true, source: 'map', mismatchM: d };
