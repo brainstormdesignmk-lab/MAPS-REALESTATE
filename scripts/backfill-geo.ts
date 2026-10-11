@@ -14,8 +14,12 @@
  *      rejected answer is written NOWHERE — it falls through to the offline
  *      fallbacks below (a wrong paid coordinate is worse than none).
  *   4. Only a trusted coordinate is saved as geo_source='google_cached'.
- *   5. Still NULL after all that → offlineMap.geocodeAddress fallback,
- *      geo_source='osm_low_confidence', print warning.
+ *   5. offlineMap.geocodeAddress fallback → osm_low_confidence.
+ *   6. Still nothing → write NO coordinate at all. lat/lon stay NULL: the
+ *      read side already serves "no trusted center" honestly, and the monthly
+ *      queue drain retries the address (offline first, free) once the map has
+ *      learned the street. Never a city-centre pin for an address nothing
+ *      could place.
  *
  * RULES: skip rows with geo_source already set; sleep(1100) between calls;
  *        log X-SerpApi-Searches-Left header each call; STOP when < 20 left.
@@ -193,6 +197,7 @@ async function main() {
   }
 
   let geocoded = 0;
+  let unresolved = 0;
   let serpapiCalls = 0;
 
   for (const p of todo) {
@@ -289,19 +294,24 @@ async function main() {
       }
     }
 
-    // Step 5: Still NULL — mark as osm_low_confidence with Skopje center
-    // for garbage addresses like "НЕПОЗНАТА", "ФГХФГХ"
-    await patchProperty(p.property_number, {
-      lat: 41.998, lon: 21.430, // Skopje center
-      geo_source: 'osm_low_confidence',
-      geocoded_at: new Date().toISOString(),
-    });
-    console.warn(`  EB ${p.property_number}: ⚠️  osm_low_confidence — Skopje center fallback (unresolvable: "${addr}")`);
-    geocoded++;
-    await sleep(1100);
+    // Step 5: nothing trustworthy came back — write NO COORDINATE.
+    //
+    // This used to patch the Skopje centre (41.998, 21.430) as
+    // geo_source='osm_low_confidence' for unresolvable addresses like
+    // "НЕПОЗНАТА"/"ФГХФГХ". A centre pin is a point NO source claimed, and it
+    // reads as a place: EB 40 ended up exactly on Google's own "could not
+    // place this query" city point, and a street anchor was then learned from
+    // it. lat/lon stay NULL instead — the row has simply not been located:
+    //   • mapRow() drops coordinates it cannot trust, and resolveSearchCenter
+    //     already serves an untrusted centre honestly (pinned by
+    //     tests/phase0-coords.test.ts in the atom);
+    //   • the monthly queue drain retries the address offline-first for FREE
+    //     once the map learns the street, and pays at most one guarded geocode.
+    console.warn(`  EB ${p.property_number}: ⛔ UNRESOLVED — no trusted coordinate written ("${addr}" stays unlocated)`);
+    unresolved++;
   }
 
-  console.log(`\n=== Done: ${geocoded}/${todo.length} geocoded, ${serpapiCalls} SerpApi calls ===`);
+  console.log(`\n=== Done: ${geocoded}/${todo.length} geocoded, ${unresolved} left unlocated, ${serpapiCalls} SerpApi calls ===`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });
