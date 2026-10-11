@@ -9,11 +9,28 @@
     "",
     "Sections:",
     "  pois      — POIs missing from OSM (name/type/lat/lon + why)",
+    "  excluded  — places considered for capture and deliberately REJECTED,",
+    "              with the reason (so the decision is reviewable and is not",
+    "              re-litigated every time someone asks 'why is X not on the map')",
     "  addresses — individual house numbers missing from OSM",
     "  aliases   — feed spelling differs from OSM spelling (one-letter",
     "              typos, old street names, garbled feed names); every row",
     "              of 'osmStreet' is duplicated under the key of 'street'",
-    "              so geocodeAddress() matches"
+    "              so geocodeAddress() matches",
+    "",
+    "WHAT BELONGS IN 'pois' (the inclusion criterion, applied to every entry",
+    "above): a PUBLIC PLACE a stranger can recognise and navigate by, because a",
+    "landmark is served in the sentence 'во близина на X' to a client who is",
+    "being denied the exact address. Every existing row is a supermarket, mall,",
+    "school or embassy on that test. A private company office fails it: the",
+    "client cannot walk to 'кај Kantar Brima'."
+  ],
+  "excluded": [
+    {
+      "name": "Кантар Брима / Kantar BRIMA",
+      "area": "Кисела Вода (near EB 94, Тоне Томшиќ)",
+      "reason": "Kantar BRIMA is the Skopje office of the Kantar/TNS market-research company (founded 1991, ESOMAR member) — a private corporate office, not a public navigable place. It is absent from BOTH source datasets: not in the OSM import (0 rows in skopje-pois.db) and not in Google Maps local results (SerpApi google_maps, 'Kantar Brima Skopje' — 0 results, no error). Capture was requested for EB 94, whose area already serves the real, well-known „Рептил“ (supermarket, 7m). Adding it would spend one of the three rotation slots on a place no client recognises, so it is deliberately NOT captured. If it becomes a public venue, add it above with a verifiable coordinate — the mechanism is one 'pois' entry, no code change."
+    }
   ],
   "pois": [
     {
