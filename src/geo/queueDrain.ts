@@ -10,9 +10,11 @@
 // Per queue row:
 //   1. Fetch the property (EB number == queue.property_id).
 //   2. No trusted center (lat/lon missing OR geo_source = osm_low_confidence)
-//      → ONE budget-guarded geocode. Inside the Skopje bbox → the property is
-//      UPGRADED to geo_source='google_cached' (never geocoded again). Outside
-//      the bbox or a geocode miss → the property STAYS osm_low_confidence.
+//      → ONE budget-guarded geocode, and the answer must pass the write-side
+//      TRUST GUARD (geocodeGuard.ts: inside bbox AND the matched result is
+//      not a city/country fallback AND it mentions the query AND it does not
+//      contradict the map's own street/POI) before the property is UPGRADED
+//      to geo_source='google_cached'. A rejected answer changes nothing.
 //   3. Re-resolve the landmark OFFLINE against the refreshed merged POI table
 //      (trusted center only). On a hit, cacheLandmark upgrades the cache entry
 //      (osm_poi → google, upgrade-only rule holds inside put()).
@@ -27,6 +29,7 @@
 import { Db } from '../store/db';
 import { LandmarkService, cacheLandmark, type PropertyRow } from './landmarks';
 import { OfflineMapStore } from './offlineMap';
+import { assessGeocode, type GeocodeEvidence } from './geocodeGuard';
 
 function dbgLog(line: string): void {
   if (process.env.DBG_GEO) { try { process.stderr.write(line); } catch { /* ignore */ } }
@@ -69,8 +72,11 @@ export interface DrainDeps {
     lat: number; lon: number; geo_source: string; geocoded_at: string;
   }): Promise<void>;
   /** ONE budget-guarded geocode (SerpApi in the real cron). Must return null
-   *  when the call itself failed — a null is never treated as a coordinate. */
-  geocode(address: string): Promise<{ lat: number; lon: number } | null>;
+   *  when the call itself failed — a null is never treated as a coordinate.
+   *  The payload must carry the matched result's WORDS (title/address), not
+   *  just a point: coordinates alone are not evidence, and the trust guard
+   *  rejects what it cannot check (the old bbox-only hole). */
+  geocode(address: string): Promise<GeocodeEvidence | null>;
   /** Live X-SerpApi-Searches-Left — the drain stops below BUDGET_STOP. */
   searchesLeft(): number;
 }
@@ -89,6 +95,11 @@ export interface DrainResult {
    *  map: a bbox-valid geocode is written back into skopje-pois.db so future
    *  properties on the same street resolve offline at import). */
   mapLearned: number;
+  /** Geocode answers the trust guard REJECTED (area-level result, query
+   *  mismatch, street/POI disagreement, outside bbox): the property keeps its
+   *  honest osm_low_confidence label instead of being stamped google_cached
+   *  with a point Google never claimed to be that address. */
+  geocodeRejected: number;
   /** Rows left queued because the budget dropped below BUDGET_STOP. */
   budgetStopped: number;
   /** Rows still in the queue after the drain. */
@@ -97,7 +108,7 @@ export interface DrainResult {
 
 export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
   const { db, offlineMap, getProperty, updatePropertyGeo, geocode, searchesLeft } = deps;
-  const res: DrainResult = { processed: 0, googleUpgraded: 0, offlineUpgraded: 0, landmarkCached: 0, mapLearned: 0, budgetStopped: 0, leftInQueue: 0 };
+  const res: DrainResult = { processed: 0, googleUpgraded: 0, offlineUpgraded: 0, landmarkCached: 0, mapLearned: 0, geocodeRejected: 0, budgetStopped: 0, leftInQueue: 0 };
 
   const rows = db.db.prepare(
     `SELECT property_id, reason FROM geo_reresolve_queue ORDER BY property_id`
@@ -159,7 +170,14 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
         continue;
       }
       const geo = await geocode(prop.address!);
-      if (geo && insideBbox(geo.lat, geo.lon)) {
+      // THE WRITE-SIDE TRUST GUARD: an in-bbox coordinate is NOT evidence.
+      // Google's place search answers with whatever matched the query TEXT —
+      // for "АСНОМ 156" it answered "Skopje / North Macedonia" (the city
+      // centre, 4.58 km off) and that earned google_cached (EB 73). The guard
+      // reads the matched result's own words (area-level? mentions the query?)
+      // and cross-checks the map's own opinion of the same street / POI.
+      const verdict = assessGeocode(prop.address!, geo, offlineMap);
+      if (verdict.trusted && geo && insideBbox(geo.lat, geo.lon)) {
         lat = geo.lat;
         lon = geo.lon;
         geoSource = 'google_cached';
@@ -174,10 +192,26 @@ export async function drainQueue(deps: DrainDeps): Promise<DrainResult> {
         // NEXT property on that street resolves offline at import — the
         // same street never needs Google twice. This is the growth loop
         // that makes "street not found" converge to zero.
-        if (offlineMap.learnAddress(prop.address!, lat, lon)) {
+        //
+        // PRECISION: learn an exact building row ONLY when Google's own
+        // address line repeated the house number we asked for. Otherwise the
+        // honest lesson is a street ANCHOR — the street is verified, the door
+        // is not ("Владимир Назор бр.26-2" → "Vladimir Nazor 8").
+        const learned = verdict.exactBuilding
+          ? offlineMap.learnAddress(prop.address!, lat, lon)
+          : offlineMap.learnStreet(prop.address!, lat, lon);
+        if (learned) {
           res.mapLearned++;
-          try { dbgLog(`[${new Date().toISOString()}] MAP-LEARNED "${prop.address}" → (${lat},${lon})\n`); } catch {}
+          try { dbgLog(`[${new Date().toISOString()}] MAP-LEARNED "${prop.address}" → (${lat},${lon}) [${verdict.exactBuilding ? 'building' : 'street'}${verdict.detail} ]\n`); } catch {}
         }
+      } else {
+        // REJECTED — the property keeps its honest label (osm_low_confidence /
+        // missing) and the map learns NOTHING from a geocode about a place
+        // Google did not confirm. The queue row is still deleted below: a
+        // property is never left looping, and the next import re-queues it if
+        // the facts change.
+        res.geocodeRejected++;
+        try { dbgLog(`[${new Date().toISOString()}] GEO-REJECT "${prop.address}" (${verdict.reason}): ${verdict.detail}\n`); } catch {}
       }
       // Outside the bbox or a geocode miss → the row STAYS osm_low_confidence.
       // Never write an unvalidated coordinate, never claim google_cached.

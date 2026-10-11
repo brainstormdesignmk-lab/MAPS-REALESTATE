@@ -18,6 +18,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as dotenv from 'dotenv';
 import { distM } from '../src/geo/precision';
+import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../src/geo/geocodeGuard';
 import { identityHeal } from './identity-heal';
 import { stripBlindFusions } from './strip-blind-fusions';
 
@@ -223,10 +224,15 @@ async function patchProperty(propertyNumber: string, data: {
   if (!res.ok) throw new Error(`patch EB ${propertyNumber}: ${res.status} ${await res.text()}`);
 }
 
-/** ONE SerpApi geocode (address → coordinate), budget shared with the top-up
- *  (serpApiLeft tracks X-SerpApi-Searches-Left live). Returns null on a miss
- *  or key exhaustion — never a fabricated coordinate. */
-async function serpApiGeocode(address: string): Promise<{ lat: number; lon: number } | null> {
+/** ONE SerpApi geocode (address → coordinate + the matched result's own
+ *  words), budget shared with the top-up (serpApiLeft tracks
+ *  X-SerpApi-Searches-Left live). Returns null on a miss or key exhaustion —
+ *  never a fabricated coordinate.
+ *
+ *  The title/address travel WITH the coordinate because the write side is not
+ *  allowed to trust a point on its own (see geocodeGuard.ts): "inside the
+ *  Skopje bbox" was how "АСНОМ 156" got stamped with the city centre. */
+async function serpApiGeocode(address: string): Promise<GeocodeEvidence | null> {
   if (SERPAPI_KEYS.length === 0) return null;
   const key = SERPAPI_KEYS[keyIdx % SERPAPI_KEYS.length];
   const q = `${address}, Skopje`;
@@ -252,11 +258,8 @@ async function serpApiGeocode(address: string): Promise<{ lat: number; lon: numb
       return serpApiGeocode(address);
     }
     spendOne();
-    const coords = data?.local_results?.[0]?.gps_coordinates
-      ?? data?.place_results?.gps_coordinates;
-    if (coords?.latitude && coords?.longitude) {
-      return { lat: coords.latitude, lon: coords.longitude };
-    }
+    const ev = extractGeocodeEvidence(data);
+    if (ev) return ev;
   } catch (e) {
     log(`  ⚠ SerpApi geocode failed for "${address}": ${(e as Error).message}`);
   }
@@ -536,8 +539,9 @@ async function phaseC(): Promise<number> {
   }
 
   // Real re-resolution (replaces the old delete-only stub):
-  //   1. No trusted center → ONE budget-guarded SerpApi geocode → bbox-valid
-  //      → geo_source upgraded to google_cached (never geocoded again).
+  //   1. No trusted center → ONE budget-guarded SerpApi geocode → in bbox AND
+  //      past the write-side trust guard (not a city/country fallback, mentions
+  //      the query, agrees with the map) → upgraded to google_cached.
   //   2. Landmark re-resolved OFFLINE against the refreshed merged POI table
   //      (cacheLandmark upgrade-only: osm_poi → google).
   //   3. Queue row deleted — outside-bbox / geocode-miss rows are drained too
@@ -565,6 +569,7 @@ async function phaseC(): Promise<number> {
 
   log(`  Drained: ${result.processed} rows`);
   log(`    google_cached upgrades: ${result.googleUpgraded}`);
+  log(`    geocode answers rejected by the trust guard: ${result.geocodeRejected}`);
   log(`    landmarks re-cached: ${result.landmarkCached}`);
   if (result.budgetStopped > 0) {
     log(`  ⚠ Budget low — ${result.budgetStopped} rows left queued for next month`);
@@ -672,14 +677,25 @@ async function phaseB3(): Promise<{ taught: number; alreadyKnown: number; upgrad
     if (offline.trusted) { stats.alreadyKnown++; continue; }
 
     const geo = await serpApiGeocode(p.address);
-    if (!geo || !insideBbox(geo.lat, geo.lon)) {
+    // THE TRUST GUARD before anything is learned or stamped: Google answers
+    // with the place that matched the query TEXT, so "АСНОМ 156" came back as
+    // "Skopje / North Macedonia" (the city centre, 4.58 km off) and a garbage
+    // address as "Greater Skopje". Outside the bbox is now just one of the
+    // ways an answer can fail; a city-level or off-street answer fails too.
+    const verdict = assessGeocode(p.address, geo, map);
+    if (!verdict.trusted || !geo || !insideBbox(geo.lat, geo.lon)) {
       stats.failed++;
-      log(`  ✗ EB ${p.property_number} "${p.address}" — geocode miss/outside bbox`);
+      log(`  ✗ EB ${p.property_number} "${p.address}" — ${verdict.reason}: ${verdict.detail}`);
       continue;
     }
     // Teach the map (the growth loop) AND upgrade the property row when it
-    // was still low-confidence — one Google call fixes both.
-    if (map.learnAddress(p.address, geo.lat, geo.lon)) stats.taught++;
+    // was still low-confidence — one Google call fixes both. Exact building
+    // only when Google repeated the house number; otherwise the street is
+    // what was verified, so learn a street ANCHOR (never a fake door).
+    const learned = verdict.exactBuilding
+      ? map.learnAddress(p.address, geo.lat, geo.lon)
+      : map.learnStreet(p.address, geo.lat, geo.lon);
+    if (learned) stats.taught++;
     if (p.geo_source === 'osm_low_confidence') {
       try {
         await patchProperty(String(p.property_number), {

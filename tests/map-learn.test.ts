@@ -89,7 +89,14 @@ test('drain teaches the map: one Google call fixes the street for EVERYONE', asy
     db, offlineMap: map,
     getProperty: async id => props.get(id),
     updatePropertyGeo: async (id, geo) => { Object.assign(props.get(id)!, { lat: geo.lat, lon: geo.lon, geo_source: geo.geo_source }); },
-    geocode: async () => { geocodeCalls++; return { lat: 41.999, lon: 21.4138 }; },
+    // The answer the trust guard must accept: the matched result is the SAME
+    // building we asked about (Google repeats the house number 86), spelled
+    // the English way — "Mirce Orovchanec", which the guard's second
+    // transliteration fold bridges to "Мирче Оровчанец".
+    geocode: async () => {
+      geocodeCalls++;
+      return { lat: 41.999, lon: 21.4138, title: 'Mirce Orovchanec 86', address: 'Mirce Orovchanec 86, Skopje 1000, North Macedonia' };
+    },
     searchesLeft: () => 200,
   });
 

@@ -65,7 +65,13 @@ test('2.1: БИСЕР-type property → drain geocodes (in bbox) → google_cach
     db, offlineMap,
     getProperty: st.getProperty,
     updatePropertyGeo: st.updatePropertyGeo,
-    geocode: async () => { geocodeCalls++; return { lat: 41.9976, lon: 21.4351 }; }, // in bbox
+    // In bbox AND carrying evidence Google published for THIS query (the
+    // matched place is a Biser pharmacy on Jane Sandanski — the real shape of
+    // a "БИСЕР" answer). Coordinates alone are no longer accepted.
+    geocode: async () => {
+      geocodeCalls++;
+      return { lat: 41.9976, lon: 21.4351, title: 'Pharmacy Biser', address: 'Jane Sandanski 82, Skopje 1000, North Macedonia' };
+    },
     searchesLeft: () => 200,
   });
 
@@ -140,7 +146,7 @@ test('2.1: budget exhausted → remaining rows stay queued, exits cleanly', asyn
       db, offlineMap,
       getProperty: st.getProperty,
       updatePropertyGeo: st.updatePropertyGeo,
-      geocode: async () => { geocodeCalls++; return { lat: 41.9976, lon: 21.4351 }; },
+      geocode: async () => { geocodeCalls++; return { lat: 41.9976, lon: 21.4351, title: 'Рамстор', address: 'Skopje' }; },
       searchesLeft: () => 15, // below BUDGET_STOP (20) from the start
     });
   } catch (e) {
@@ -200,6 +206,58 @@ test('2.1: centre mismatch → the MAP repairs it FREE, SerpApi is never called 
   const cached = new LandmarkStore(db).get(94);
   assert.ok(cached, 'landmark cached from the map');
   assert.equal(queueCount(db), 0);
+  offlineMap.close();
+});
+
+test('2.1: city-level answer (EB 73 shape) → REJECTED, stays honest, map learns nothing', async () => {
+  // The live 2026-09-03 failure: "АСНОМ 156" was geocoded and Google replied
+  // with the CITY (title "Skopje", address "North Macedonia", gps 41.9981,
+  // 21.4254) — 4.58 km from the building. Inside the bbox, so the old
+  // bbox-only guard stamped google_cached. The map already knows АСНОМ's rows
+  // (the address table), so the guard has an opinion to contradict: 4.58 km.
+  const db = new Db(':memory:');
+  // #5 (not #156) so the map's free offline path cannot resolve this property:
+  // the row under test is the PAID geocode's answer, not step 2a.
+  const mapPath = tmpMapDb();
+  writeMap(mapPath,
+    [{ name: 'Рамстор', type: 'mall', lat: 41.9981, lon: 21.4254, source: 'google' }],
+    [{ street: 'Бул. АСНОМ', housenumber: '5', lat: 41.9854, lon: 21.4522 }]);
+  const offlineMap = new OfflineMapStore(mapPath);
+
+  const before = (new (require('better-sqlite3'))(mapPath, { readonly: true })
+    .prepare('SELECT COUNT(*) AS c FROM addresses').get() as { c: number }).c;
+
+  const st = makeStore();
+  st.props.set(73, { propertyId: 73, address: 'АСНОМ 156', location: 'Аеродром', lat: null, lon: null, geo_source: 'osm_low_confidence' });
+  queueRow(db, 73);
+
+  let geocodeCalls = 0;
+  const res = await drainQueue({
+    db, offlineMap,
+    getProperty: st.getProperty,
+    updatePropertyGeo: st.updatePropertyGeo,
+    geocode: async () => {
+      geocodeCalls++;
+      return { lat: 41.9981, lon: 21.4254, title: 'Skopje', address: 'North Macedonia' };
+    },
+    searchesLeft: () => 200,
+  });
+  assert.equal(geocodeCalls, 1, 'the map could not resolve it, so Google was asked');
+
+  // NOT upgraded: the coordinate Google returned is the city centre, not the address.
+  assert.equal(st.patches.length, 0, 'a city-level answer must never patch google_cached');
+  const prop = st.props.get(73)!;
+  assert.equal(prop.geo_source, 'osm_low_confidence', 'the honest label survives');
+  assert.equal(prop.lat, null);
+  assert.equal(res.googleUpgraded, 0);
+  assert.equal(res.geocodeRejected, 1, 'the rejection is counted, not silent');
+  assert.equal(res.mapLearned, 0, 'no knowledge is fabricated from a city-level answer');
+  const after = (new (require('better-sqlite3'))(mapPath, { readonly: true })
+    .prepare('SELECT COUNT(*) AS c FROM addresses').get() as { c: number }).c;
+  assert.equal(after, before, 'addresses table unchanged');
+  // Never left looping.
+  assert.equal(queueCount(db), 0);
+  assert.equal(res.processed, 1);
   offlineMap.close();
 });
 

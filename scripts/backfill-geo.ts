@@ -8,9 +8,12 @@
  *        GET https://serpapi.com/search
  *          ?engine=google_maps&type=search&q=<address>, Skopje&hl=en&api_key=SERPAPI_KEY
  *        → local_results[0].gps_coordinates  (or place_results.gps_coordinates)
- *   3. Validate inside Skopje bbox: lat 41.95–42.05, lon 21.35–21.50
- *        else geo_source='osm_low_confidence'
- *   4. Save lat/lon/geo_source/geocoded_at. NEVER geocode this property again.
+ *   3. Validate the ANSWER, not just the bbox (src/geo/geocodeGuard.ts): the
+ *      matched result must not be a city/country fallback, must mention the
+ *      query, and must agree with the offline map's own street/POI. A
+ *      rejected answer is written NOWHERE — it falls through to the offline
+ *      fallbacks below (a wrong paid coordinate is worse than none).
+ *   4. Only a trusted coordinate is saved as geo_source='google_cached'.
  *   5. Still NULL after all that → offlineMap.geocodeAddress fallback,
  *      geo_source='osm_low_confidence', print warning.
  *
@@ -25,6 +28,7 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs';
+import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../src/geo/geocodeGuard';
 
 // Load env from ~/.lina/lina.env
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
@@ -121,7 +125,7 @@ const SERPAPI_KEYS = loadSerpApiKeys();
 let keyIdx = 0;
 let serpApiLeft = 250;
 
-async function serpApiGeocode(address: string): Promise<{ lat: number; lon: number } | null> {
+async function serpApiGeocode(address: string): Promise<GeocodeEvidence | null> {
   if (SERPAPI_KEYS.length === 0) return null;
   const key = SERPAPI_KEYS[keyIdx % SERPAPI_KEYS.length];
   const q = `${address}, Skopje`;
@@ -139,11 +143,13 @@ async function serpApiGeocode(address: string): Promise<{ lat: number; lon: numb
       if (keyIdx >= SERPAPI_KEYS.length) return null;
       return serpApiGeocode(address); // retry with next key
     }
-    const coords = data?.local_results?.[0]?.gps_coordinates
-      ?? data?.place_results?.gps_coordinates;
-    if (coords?.latitude && coords?.longitude) {
+    // The matched result's own words travel with the coordinate — the guard
+    // needs them, because "inside the bbox" alone is not evidence (the hole
+    // that stamped EB 73 with the city centre).
+    const ev = extractGeocodeEvidence(data);
+    if (ev) {
       keyIdx++;
-      return { lat: coords.latitude, lon: coords.longitude };
+      return ev;
     }
   } catch (e) {
     console.warn(`  ⚠ SerpApi failed for "${address}": ${(e as Error).message}`);
@@ -206,7 +212,15 @@ async function main() {
     const coords = await serpApiGeocode(addr);
     serpapiCalls++;
 
-    if (coords && insideBbox(coords.lat, coords.lon)) {
+    // THE TRUST GUARD — the whole reason this path stopped lying. Google's
+    // place search answers with whatever matched the query TEXT: "АСНОМ 156"
+    // came back as "Skopje / North Macedonia" (the city centre, 4.58 km off)
+    // and "ХФГХФГХ" as "Greater Skopje". Both are inside the bbox, so the old
+    // check stamped them google_cached. Now a rejected answer is never
+    // written at all: the address falls through to the offline map fallbacks
+    // below, which is strictly better than a wrong paid coordinate.
+    const verdict = assessGeocode(addr, coords, offlineMap ?? undefined);
+    if (verdict.trusted && coords) {
       await patchProperty(p.property_number, {
         lat: coords.lat,
         lon: coords.lon,
@@ -218,19 +232,8 @@ async function main() {
       await sleep(1100); // SerpApi rate limit: 1 req/sec
       continue;
     }
-
-    if (coords) {
-      // Outside bbox → osm_low_confidence
-      await patchProperty(p.property_number, {
-        lat: coords.lat,
-        lon: coords.lon,
-        geo_source: 'osm_low_confidence',
-        geocoded_at: new Date().toISOString(),
-      });
-      console.log(`  EB ${p.property_number}: ⚠️  osm_low_confidence — outside bbox (${coords.lat.toFixed(6)}, ${coords.lon.toFixed(6)})`);
-      geocoded++;
-      await sleep(1100);
-      continue;
+    if (coords || verdict.reason !== 'no_evidence') {
+      console.log(`  EB ${p.property_number}: ⛔ geocode REJECTED (${verdict.reason}) — ${verdict.detail}`);
     }
 
     // Step 2: Offline map fallback (street address)

@@ -8,7 +8,14 @@
  *               learnStreet (a Google-verified street ANCHOR — the whole
  *               street serves trusted, any house number);
  *   --thin      class (b): one geocode per FEED-CARRIED number on thin
- *               streets, learned via learnAddress (number-level rows);
+ *               streets, learned via learnAddress (number-level rows) when
+ *               Google repeats that number, else via learnStreet (the street
+ *               is what was verified — never claim a door Google did not);
+ *
+ * Every answer runs through the write-side TRUST GUARD (geocodeGuard.ts)
+ * before the map learns from it: a city/country fallback ("Greater Skopje"
+ * for a garbage street), an answer that does not mention the street, or one
+ * that contradicts the map's own view is NOT knowledge and teaches nothing.
  *   --cap=N     search budget (class (c) first — never trimmed);
  *   --dry       print the plan, spend nothing.
  *
@@ -32,6 +39,7 @@ import * as os from 'os';
 import * as fs from 'fs';
 import Database from 'better-sqlite3';
 import { OfflineMapStore } from '../src/geo/offlineMap';
+import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../src/geo/geocodeGuard';
 import { insideSkopjeBbox } from '../src/geo/serpCapture';
 import {
   collectCandidates, classifyAll, buildTeachPlan, type TeachTask,
@@ -77,7 +85,7 @@ let keyIdx = 0;
 let serpApiLeft = 250;
 let sessionSpend = 0;
 
-type GeocodeResult = { lat: number; lon: number } | null | 'RATE_LIMITED';
+type GeocodeResult = GeocodeEvidence | null | 'RATE_LIMITED';
 
 async function serpApiGeocode(query: string): Promise<GeocodeResult> {
   if (SERPAPI_KEYS.length === 0) return null;
@@ -102,11 +110,12 @@ async function serpApiGeocode(query: string): Promise<GeocodeResult> {
       return serpApiGeocode(query);
     }
     if (res.status === 429) return 'RATE_LIMITED';
-    const coords = data?.local_results?.[0]?.gps_coordinates
-      ?? data?.place_results?.gps_coordinates;
+    // Evidence, not just a point: the guard reads the matched result's words
+    // (title/address) — coordinates alone are how a garbage street got a
+    // trusted anchor in the first place.
+    const ev = extractGeocodeEvidence(data);
     sessionSpend++;
-    if (coords?.latitude && coords?.longitude) return { lat: coords.latitude, lon: coords.longitude };
-    return null;
+    return ev;
   } catch (e) {
     console.warn(`  ⚠ geocode "${query}": ${(e as Error).message}`);
     return null;
@@ -154,19 +163,37 @@ async function teach(task: TeachTask, map: OfflineMapStore): Promise<'taught' | 
     if (geo === 'RATE_LIMITED') return 'limited';
     if (!geo) return 'miss';
     if (!insideSkopjeBbox(geo.lat, geo.lon)) return 'outside';
+    // THE TRUST GUARD: a garbage street name must never earn an anchor from a
+    // "Greater Skopje" answer. Only a result that IS about this street teaches.
+    const verdict = assessGeocode(q, geo, map);
+    if (!verdict.trusted) {
+      console.log(`  ⛔ not taught "${task.street}" (${verdict.reason}): ${verdict.detail}`);
+      return 'miss';
+    }
     // THE WHOLE STREET, ONE CALL: Google confirmed the street at that pin.
     if (!map.learnStreet(task.street, geo.lat, geo.lon)) return 'miss';
     return 'taught';
   }
-  // Class (b): one geocode per number, number-level learning.
+  // Class (b): one geocode per number.
   let any = false;
   for (const num of task.numbers) {
     const q = `${task.street} ${num}, Скопје, Северна Македонија`;
     const geo = await serpApiGeocode(q);
     if (geo === 'RATE_LIMITED') return 'limited';
-    if (geo && insideSkopjeBbox(geo.lat, geo.lon) && map.learnAddress(`${task.street} ${num}`, geo.lat, geo.lon)) {
-      any = true;
+    if (!geo) { await sleep(PACING_MS); continue; }
+    if (!insideSkopjeBbox(geo.lat, geo.lon)) { await sleep(PACING_MS); continue; }
+    const verdict = assessGeocode(q, geo, map);
+    if (!verdict.trusted) {
+      console.log(`  ⛔ not taught "${task.street} ${num}" (${verdict.reason}): ${verdict.detail}`);
+      await sleep(PACING_MS);
+      continue;
     }
+    // Number-level ONLY when Google's answer repeated that number; otherwise
+    // the verified fact is the street, so plant a street anchor instead.
+    const learned = verdict.exactBuilding
+      ? map.learnAddress(`${task.street} ${num}`, geo.lat, geo.lon)
+      : map.learnStreet(task.street, geo.lat, geo.lon);
+    if (learned) any = true;
     await sleep(PACING_MS);
   }
   return any ? 'taught' : 'miss';

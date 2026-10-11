@@ -880,6 +880,55 @@ export class OfflineMapStore {
       .sort((a, b) => a.dist - b.dist);
   }
 
+  /** Lazy normName cache of the pois table (for poiDistanceM). */
+  private poisNormed: Array<{ norm: string; lat: number; lon: number }> | null = null;
+
+  /** Distance (m) from (lat,lon) to the NEAREST address row of the street
+   *  this query names (house number stripped), or null when the street is
+   *  unknown to the map — the geocode trust guard's "your street is HERE but
+   *  the pin is over THERE" check. Exact key only (no fuzzy): a cross-check
+   *  must never compare against a street we merely guessed at.
+   */
+  streetDistanceM(query: string, lat: number, lon: number): number | null {
+    if (!this.db) return null;
+    const key = streetKey(query);
+    if (!key) return null;
+    const rows = this.db.prepare(
+      'SELECT lat, lon FROM addresses WHERE key = ?'
+    ).all(key) as Array<{ lat: number; lon: number }>;
+    if (rows.length === 0) return null;
+    let min = Infinity;
+    for (const r of rows) {
+      const d = meters({ lat, lon }, r);
+      if (d < min) min = d;
+    }
+    return min;
+  }
+
+  /** Distance (m) from (lat,lon) to the NEAREST POI whose name contains the
+   *  query (normName-folded), or null when no such POI exists or the query is
+   *  too short to match safely — the guard's landmark cross-check (the TC
+   *  Olimpiko lesson: pin on a tire shop 2.2 km from the mall).
+   */
+  poiDistanceM(query: string, lat: number, lon: number): number | null {
+    if (!this.db) return null;
+    const q = normName(query);
+    if (q.length < 4) return null;
+    if (!this.poisNormed) {
+      const rows = this.db.prepare('SELECT name, lat, lon FROM pois').all() as Array<
+        { name: string; lat: number; lon: number }
+      >;
+      this.poisNormed = rows.map(r => ({ norm: normName(r.name), lat: r.lat, lon: r.lon }));
+    }
+    let min = Infinity;
+    for (const p of this.poisNormed) {
+      if (!p.norm.includes(q)) continue;
+      const d = meters({ lat, lon }, p);
+      if (d < min) min = d;
+    }
+    return min === Infinity ? null : min;
+  }
+
   /** Local address → coordinates. When the address includes a house number
    *  ("Јане Сандански 25"), we prefer the EXACT building at that number so
    *  the POI radius is centred on the right spot (not the whole boulevard).
