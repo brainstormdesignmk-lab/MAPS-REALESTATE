@@ -314,6 +314,16 @@ export const IDENTITY_NOISE = new Set([
   'of', 'the', 'na', 'vo', 'od', 'do', 'kaj', 'sproti', 'de', 'i', 'so', 'za',
   'and', 'in', 'at', 'republic', 'republika', 'republiki', 'federal', 'federacija',
   'general', 'br', 'b', 'ul', 'ulica', 'street', 'bulevar', 'boulevard',
+  // GENERIC VENUE WORDS. "Mavrovka Mall" / "ТЦ Мавровка" / "Mavrovka" are one
+  // shopping centre described three ways; without dropping the generic part the
+  // same building took three rotation slots (live 2026-10-11: 54m / 54m / 74m
+  // in one reply). These words describe WHAT a place is, never WHICH one it is,
+  // so they carry no identity — and the Kipper protection still holds, because
+  // "Kipper" vs "Kipper Market - Butel" keeps the neighbourhood token 'butel'.
+  'mall', 'tc', 'trgovski', 'shopping', 'shop', 'center', 'centre', 'centar',
+  // INSTITUTIONAL ABBREVIATIONS — the same school across two sources:
+  // "ООУ Лазо Ангеловски" and "ОУ Лазо Ангеловски" (основно/општинско училиште).
+  'oou', 'ou', 'sou', 'ju', 'jp', 'ad', 'doo', 'dptu', 'guc', 'dgu', 'azc',
 ]);
 
 /** Distinctive qualifiers that make two same-country institutions DIFFERENT
@@ -802,8 +812,18 @@ export class OfflineMapStore {
     // unusable rows (unknown types, bare "yes" buildings) out of the override
     // so a kiosk can never hijack the first slot.
     const NEAR_OVERRIDE_M = 75;
+    // …BUT A TRANSIT STOP NEVER TAKES THE BAND (2026-10-11, Бул. АСНОМ 134).
+    // A stop is NAMED AFTER the place it serves: „Парк Аеродром“ is a bus stop
+    // ~52m from the door while the park the client asked about (Парк Авионче,
+    // with the plane monument) is 180m across the boulevard. Boosting the stop
+    // made the reply say "во близина на Парк Аеродром" — the client hears the
+    // PARK and walks to a bus stop. Stops still rank (and are still served),
+    // they just cannot outrank the real place within a tier. The override keeps
+    // doing its job for places at the door: Рептил (supermarket, 53m) still
+    // beats the famous landmark 200m away.
+    const TRANSIT_TYPES = new Set(['bus_station', 'bus_stop', 'tram_station', 'tram_stop']);
     const nearBand = (r: { dist: number; type: string }): number =>
-      r.dist <= NEAR_OVERRIDE_M && typeRank(r.type) >= 1 ? 0 : 1;
+      r.dist <= NEAR_OVERRIDE_M && typeRank(r.type) >= 1 && !TRANSIT_TYPES.has(normType(r.type)) ? 0 : 1;
     const ranked = clean.sort((a, b) =>
       (nearBand(a) - nearBand(b))
       || (typeRank(b.type) - typeRank(a.type))

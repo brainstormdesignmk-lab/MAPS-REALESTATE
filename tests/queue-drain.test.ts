@@ -157,7 +157,53 @@ test('2.1: budget exhausted → remaining rows stay queued, exits cleanly', asyn
   offlineMap.close();
 });
 
-test('2.1: insideBbox guard sanity', () => {
+test('2.1: centre mismatch → the MAP repairs it FREE, SerpApi is never called (EB 94)', async () => {
+  const db = new Db(':memory:');
+  const mapPath = tmpMapDb();
+  // The map already knows the building: "Тоне Томшиќ 25" resolves 21m from the
+  // real place, while the feed carried a google_cached point 76m off (the live
+  // EB 94 facts). Paying SerpApi for a coordinate the map can produce for free
+  // was the bug the offline-first order fixes.
+  writeMap(mapPath, [
+    { name: 'Reptil Market br.3 Kisela Voda', type: 'supermarket', lat: 41.9813795, lon: 21.4384452, source: 'google' },
+  ], [
+    { street: 'Тоне Томшиќ', housenumber: '25', lat: 41.9812985, lon: 21.4382176 },
+  ]);
+  const offlineMap = new OfflineMapStore(mapPath);
+
+  const st = makeStore();
+  st.props.set(94, {
+    propertyId: 94, address: 'ТОНЕ ТОМШИЌ БР.25', location: 'Кисела Вода',
+    lat: 41.9811, lon: 21.4376, geo_source: 'google_cached',
+  });
+  queueRow(db, 94, 'center_mismatch');
+
+  let geocodeCalls = 0;
+  const res = await drainQueue({
+    db, offlineMap,
+    getProperty: st.getProperty,
+    updatePropertyGeo: st.updatePropertyGeo,
+    geocode: async () => { geocodeCalls++; return { lat: 41.9999, lon: 21.4999 }; },
+    searchesLeft: () => 200,
+  });
+
+  assert.equal(geocodeCalls, 0, 'the local map must resolve it before any paid geocode');
+  assert.equal(res.offlineUpgraded, 1);
+  assert.equal(res.googleUpgraded, 0);
+  assert.equal(st.patches.length, 1, 'the feed row is patched with the map point');
+  assert.equal(st.patches[0].geo.lat, 41.9812985);
+  assert.equal(st.patches[0].geo.lon, 21.4382176);
+  assert.match(String(st.patches[0].geo.geo_source), /^osm_/, 'provenance is the map resolution, not google_cached');
+  const prop = st.props.get(94)!;
+  assert.equal(prop.lat, 41.9812985, 'the repaired centre is what the rotation runs from');
+  // …and the landmark now cached is the real place, not the bus stop 145m away.
+  const cached = new LandmarkStore(db).get(94);
+  assert.ok(cached, 'landmark cached from the map');
+  assert.equal(queueCount(db), 0);
+  offlineMap.close();
+});
+
+test('2.2: insideBbox guard sanity', () => {
   assert.equal(insideBbox(41.9976, 21.4351), true);   // TC BISER — Skopje
   assert.equal(insideBbox(42.10, 21.60), false);      // outside Skopje bbox
   assert.equal(insideBbox(41.95, 21.35), true);       // bbox edge inclusive

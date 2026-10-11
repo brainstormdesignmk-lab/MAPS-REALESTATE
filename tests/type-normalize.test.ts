@@ -113,3 +113,24 @@ test('capitalized Google types rank identically to lowercase OSM types', () => {
   assert.ok(names.indexOf('Аптека Алфа') < names.indexOf('Аптека Бета'), 'same-rank pharmacies sort by distance');
   store.close();
 });
+
+test('a PARK outranks a closer bus stop named after it (EB 89 / Парк Авионче)', () => {
+  // The live 2026-10-11 case. Бул. АСНОМ 134 (Аеродром) has five bus stops
+  // inside 250m — one of them literally called "Парк Аеродром" and only 95m
+  // away — plus the park the neighbourhood is actually known by, „Парк
+  // Авионче“ with the plane monument, 180m across the boulevard. With transit
+  // ranked ABOVE parks the reply named the bus stop and the client hears the
+  // park: they walk to the wrong place, because the stop and the park are not
+  // the same spot. The park is the place; the stop is only named after it.
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Парк Аеродром', type: 'bus_station', lat: 41.98840, lon: 21.47652 },          // ~95m, rank 3
+    { name: 'Парк Авионче', type: 'park', lat: 41.98944, lon: 21.47676 },                 // ~180m, rank 4
+    { name: 'Полициска Станица - Аеродром', type: 'police', lat: 41.98569, lon: 21.47345 }, // ~350m, rank 4
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.98794, 21.47659, 500, 10);
+  assert.equal(pois[0].name, 'Парк Авионче', `the park must be the anchor, got ${pois.map(p => p.name).join(', ')}`);
+  assert.ok(pois.some(p => p.name === 'Парк Аеродром'), 'the stop is still served, just not first');
+  store.close();
+});

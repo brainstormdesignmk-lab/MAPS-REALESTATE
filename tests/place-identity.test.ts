@@ -160,6 +160,50 @@ test('centre cross-check: agreement (<50m) keeps the feed point and queues NOTHI
   db.close();
 });
 
+test('low-confidence feed row: the map building point is trusted and the PARK is served (EB 89)', () => {
+  // Live 2026-10-11: Бул. АСНОМ 134 arrived from the feed as osm_low_confidence
+  // with a point that looked fine. resolveSearchCenter fell through to
+  // geocodeAddress() (never trusted), so the rotation took the 300m-floor grace
+  // path and answered "во близина на Полициска Станица - Аеродром" (351m) while
+  // „Парк Авионче“ — the park across the boulevard, 180m — was never considered.
+  // The map knew the building all along; a confirmed building point is trusted
+  // whatever the feed's label says, and the row is queued so the feed is fixed
+  // too.
+  const mapPath = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'eb89-')), 'map.db');
+  writeMap(mapPath, [
+    { name: 'Парк Аеродром', type: 'bus_station', lat: 41.98840, lon: 21.47652 },            // ~95m
+    { name: 'Парк Авионче', type: 'park', lat: 41.98944, lon: 21.47676 },                   // ~180m
+    { name: 'Полициска Станица - Аеродром', type: 'police', lat: 41.98569, lon: 21.47345 }, // ~350m
+  ], [
+    { street: 'Бул. Асном', housenumber: '134', lat: 41.9878895, lon: 21.4764927 },
+  ]);
+  const db = new Db(':memory:');
+  const svc = new LandmarkService(db, { osm: false, offlineMap: new OfflineMapStore(mapPath) });
+  const row = {
+    id: 89, eb: 89, address: 'Бул. Асном бр.134', location: 'Аеродром',
+    lat: 41.9879, lon: 21.4765, geo_source: 'osm_low_confidence',
+  } as PropertyRow & { id: number };
+
+  const center = resolveSearchCenter(row);
+  assert.equal(center.trusted, true, 'the map\'s confirmed building point is trusted');
+  assert.equal(center.source, 'map');
+  assert.equal(center.lat, 41.9878895);
+
+  const served = svc.nearbyLandmarks(row);
+  assert.equal(
+    served[0]?.landmark,
+    'Парк Авионче',
+    `the park must be the anchor, got ${JSON.stringify(served.map(s => s.landmark))}`,
+  );
+
+  const q = db.db.prepare(
+    `SELECT reason FROM geo_reresolve_queue WHERE property_id = 89`
+  ).get() as { reason: string } | undefined;
+  assert.equal(q?.reason, 'low_confidence_center', 'the feed row itself is queued for repair');
+  svc.offlineMap!.close();
+  db.close();
+});
+
 test('AUDIT: no two rotation entries in the live map are the same place', () => {
   const db = path.join(process.cwd(), 'data', 'skopje-pois.db');
   if (!fs.existsSync(db)) {

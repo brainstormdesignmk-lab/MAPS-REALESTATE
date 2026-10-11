@@ -220,6 +220,23 @@ export function resolveSearchCenter(p: PropertyRow): SearchCenter {
     }
     return { lat: stored.lat, lon: stored.lon, trusted: true, source: 'stored' };
   }
+  // NO TRUSTWORTHY STORED POINT (osm_low_confidence, or none at all): the map's
+  // OWN address resolution goes first, and it may be TRUSTED (exact building /
+  // interpolated) — the same resolver importGeo and the drain already use.
+  //
+  // WHY (EB 89, 2026-10-11): the row sat at a fine point but was labelled
+  // osm_low_confidence, so this function fell through to geocodeAddress() —
+  // which by design never returns trusted:true. The rotation then took the
+  // "grace" path (only POIs 300–500m away, a 300m distance floor) and answered
+  // "во близина на Полициска Станица" (351m) — while the park across the
+  // boulevard (Парк Авионче, 180m) was never even considered. A confirmed
+  // building point is a confirmed building point, whatever the feed's label
+  // says about it.
+  const building = _offlineMapRef?.resolvePropertyOffline(p.address ?? '');
+  if (building?.trusted && building.lat != null && building.lon != null) {
+    const mismatchM = p.lat && p.lon ? _distM(p.lat, p.lon, building.lat, building.lon) : undefined;
+    return { lat: building.lat, lon: building.lon, trusted: true, source: 'map', mismatchM };
+  }
   const osm = _offlineMapRef?.geocodeAddress(p.address ?? '');
   if (osm) return { lat: osm.lat, lon: osm.lon, trusted: false, source: 'geocode' };
   return { lat: 0, lon: 0, trusted: false, source: 'none' };
@@ -613,6 +630,22 @@ export class LandmarkService {
       } catch {}
       try { dbgLog(
         `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-CENTER-MISMATCH stored=${Math.round(center.mismatchM ?? 0)}m off → using the map's own address point, queued\n`); } catch {}
+    }
+
+    // FEED REPAIR for an untrustworthy STORED centre (missing coordinates, or a
+    // neighbourhood centroid). resolveSearchCenter may still hand us a trusted
+    // map point below, so the ANSWER is good — but the feed row itself must be
+    // corrected, or every future reader walks back into the same path and the
+    // public page keeps a missing/wrong pin (EB 89: trusted building point
+    // available, feed row still labelled osm_low_confidence). The monthly drain
+    // re-resolves it offline for free and writes the real geo_source.
+    const storedUntrusted = !p.lat || !p.lon || p.geo_source === 'osm_low_confidence';
+    if (storedUntrusted && p.id != null) {
+      try {
+        this.db.db.prepare(
+          `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
+        ).run(p.id, 'low_confidence_center', new Date().toISOString());
+      } catch {}
     }
 
     if (!center.trusted) {

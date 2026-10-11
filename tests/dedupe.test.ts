@@ -80,7 +80,9 @@ test('nearest POIs capped at limit, preference-ranked', () => {
   // from the door beats a famous one 200m away — then typeRank, then distance.
   assert.equal(pois[0].name, 'Кафе Миро', 'the 47m cafe outranks the 238m mall');
   assert.equal(pois[1].name, 'Рамстор Мол');
-  assert.equal(pois[2].name, 'Аптека 24');
+  // …and a PARK (rank 4, the 150m Градски) now beats the 130m pharmacy (3):
+  // "спроти паркот" locates a building better than "кај аптеката" (2026-10-11).
+  assert.equal(pois[2].name, 'Парк Градски');
   store.close();
 });
 test('same place_id merges ACROSS names and distances (embassy alias regression)', () => {
