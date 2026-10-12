@@ -25,10 +25,13 @@ export function walkMinutes(meters: number): number {
 //   ✗ tinyurl.com/...  → works, but the agency won't send third-party shorteners
 //   ✓ google.com/maps/@lat,lon,zoom  → short, opens the map AT the point, but
 //       shows no named place card
+//   ✓ maps.google.com/?q=lat,lon      → Google's own domain, ~44 chars, drops
+//       a RED PIN on the exact point. The primary landmark link since the
+//       [23:50] capture (a place card names the place but shows no pin).
 //   ✓ maps.google.com/?cid=<decimal> → Google's own domain, ~49 chars, opens
-//       the EXACT place card (verified in a real browser). Requires the POI's
-//       Google place_id — the hex "0x…:0x…" pair whose second half decimalizes
-//       into the cid. This is the primary landmark link.
+//       the EXACT place card but shows NO PIN (client-reported). Fallback for
+//       landmarks with no usable coordinate; requires the POI's Google
+//       place_id — the hex "0x…:0x…" pair whose second half decimalizes to it.
 // The landmark/property NAME is carried in the reply TEXT ("во близина на …"),
 // never in the URL.
 
@@ -79,17 +82,23 @@ export function fullCoordsLink(lat: number, lon: number): string {
   return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
 }
 
-// Landmark link — priority order:
+// Landmark link — priority order (revised 2026-10-13, the [23:50] capture):
 //   1. A stored google.com/maps URL (canonical place_url from the capture
 //      script) — emitted verbatim, original Google.
-//   2. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
-//      Google's own domain, ~49 chars (truncation-proof, verified in browser).
-//   3. Coordinate pin via maps.google.com/?q=lat,lon (~44 chars) — ALWAYS drops
-//      a red pin on the exact spot. Name searches are BANNED: with no city
-//      context Google biases them by the viewport/keywords and can return a
-//      results LIST at country zoom instead of a pin (production bug: a
-//      "crna gora" embassy name-search opened a Montenegro-wide list). The
-//      landmark's NAME is carried in the reply text, never in the URL.
+//   2. Coordinate pin via maps.google.com/?q=lat,lon (~44 chars) — DROPS A RED
+//      PIN on the exact spot. Now the PRIMARY landmark link. The cid form was
+//      primary until the operator reported what a client actually sees: "link
+//      with card for the landmark but no pin" — a place CARD tells the client
+//      which place it is, but not WHERE it is, and the reply already carries
+//      the landmark's name in text. The pin is also shorter (44 vs 46–49 chars)
+//      so it fits the narrowest supported chat pane, and it is ASCII-only.
+//   3. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
+//      now the FALLBACK for landmarks with no usable coordinate.
+// Name searches are BANNED: with no city context Google biases them by the
+// viewport/keywords and can return a results LIST at country zoom instead of a
+// pin (production bug: a "crna gora" embassy name-search opened a
+// Montenegro-wide list). The landmark's NAME is carried in the reply text,
+// never in the URL.
 // Never: tinyurl (third-party shortener — agency refuses it), never
 // percent-encoded Cyrillic name searches, never a name-only ?q=<name> search,
 // never a bare @-view (opens a map with no landmark).
@@ -101,14 +110,17 @@ export function landmarkLink(name: string, placeId: string | null, lat: number, 
   if (placeUrl && /^https?:\/\/(www\.)?(google\.com|maps\.google\.com|google\.mk)\//.test(placeUrl)) {
     return placeUrl;
   }
-  // 1. place_id → exact place card via cid (Google's own short deep-link).
+  // 1. Coordinate pin — deterministic, unambiguous, and the only form that
+  //    puts a MARKER on the map (the [23:50] decision: card-but-no-pin loses
+  //    to a pin that shows where the landmark is).
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
+  }
+  // 2. No usable coordinate → the exact place card via cid (Google's own short
+  //    deep-link). Better the right place with no pin than nothing at all.
   if (placeId) {
     const cid = cidLink(placeId);
     if (cid) return cid;
-  }
-  // 2. Coordinate pin — deterministic, unambiguous, always a red pin.
-  if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
   }
   return '';
 }

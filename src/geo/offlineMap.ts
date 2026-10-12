@@ -45,9 +45,11 @@ export interface LocalPoi {
    *  scripts/capture-place-urls.ts). When present, links should use it so the
    *  client's map opens the EXACT place card, not a bare coordinate view. */
   place_url?: string;
-  /** Google place_id (hex pair "0x…:0x…"). When present, landmarkLink emits
-   *  maps.google.com/?cid=<decimal> — the EXACT place card, immune to name
-   *  ambiguity. Populated from overrides and the monthly SerpApi top-up. */
+  /** Google place_id (hex pair "0x…:0x…"). When a row has NO usable
+   *  coordinate, landmarkLink emits maps.google.com/?cid=<decimal> — the EXACT
+   *  place card, immune to name ambiguity. With coordinates the PIN wins
+   *  (2026-10-13 policy: a card names the place but shows no pin). Populated
+   *  from overrides and the monthly SerpApi top-up. */
   place_id?: string;
   /** PROMINENCE (the TC Kapištec lesson): how well-known the place is.
    *  Google review count — the tie-breaker WITHIN a type tier. OSM rows
@@ -668,7 +670,8 @@ export interface MergedPoi {
  *    • Google's coordinates win (verified), its rating/reviews ride along
  *    • the better type wins — a rank-0 Google row ("Corporate office",
  *      "Foreign consulate") must NOT demote a diplomatic row to type 0, but
- *      it still donates its place_id (Turkey: ?q= → ?cid=)
+ *      it still donates its place_id, so the served row keeps Google's
+ *      identity for the no-coordinate place-card fallback (Turkey)
  *    • the distance is recomputed against the coordinates actually served */
 export function mergeSamePlace(keep: MergedPoi, other: MergedPoi, centerLat: number, centerLon: number): MergedPoi {
   const kCyr = prefersLocalScript(keep.name), oCyr = prefersLocalScript(other.name);

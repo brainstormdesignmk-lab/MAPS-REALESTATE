@@ -472,8 +472,10 @@ export class LandmarkService {
       // *name-search* URL ("maps/search/?api=1&query=<name>"), which opens a
       // results LIST rather than the place — the exact form the project banned
       // for landmark answers. The landmark NAME is authoritative from the feed;
-      // the PIN is resolved here against the offline POI table — place_id → the
-      // exact place card, else a coordinate pin. The feed's URL survives only
+      // the PIN is resolved here against the offline POI table — the matched
+      // POI's own coordinates, i.e. a coordinate pin (its place_id serves the
+      // exact place card only when no coordinate exists). The feed's URL survives
+      // only
       // for places the map does not know, where it is the only evidence there is.
       const guarded = p.landmarks.map(l => {
         let poi: PoiHit;
