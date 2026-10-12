@@ -7,19 +7,60 @@
 # prints [db:xxxxxxxx] so mismatch is visible in the first second.
 #
 # Usage:
-#   scripts/deploy_map.sh user@host /path/to/inbound_final
+#   scripts/deploy_map.sh user@host /path/to/inbound_final [ssh-key]
+#   scripts/deploy_map.sh --key ~/.ssh/id_ed25519_atom01 atom01 /path/to/inbound_final
+#
+# The identity is EXPLICIT on purpose. This script used to lean on whatever
+# `ssh` picked by default (agent + ~/.ssh/config), and that is exactly how the
+# 2026-10-12 atom01 deploy "succeeded" while shipping nothing: the default
+# identity could not authenticate, and the deploy steps down the chain were
+# attempted on the wrong footing. Never depend on ssh-config drift — pass the
+# key like deploy-atoms.sh does (atoms.conf: "the key is passed explicitly").
+# DEPLOY_MAP_SSH_KEY is honoured as a fallback.
 #
 # Steps on THIS machine: verify DB opens → write checksum → tar → scp.
 # Steps on TARGET (run automatically via ssh): backup old db, extract,
 # verify checksum, print new [db:] identity.
 set -euo pipefail
 
-if [[ $# -ne 2 ]]; then
-  echo "Usage: $0 user@host /path/to/inbound_final"
+SSH_KEY="${DEPLOY_MAP_SSH_KEY:-}"
+POS=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --key)     SSH_KEY="${2:-}"; shift 2 ;;
+    --key=*)   SSH_KEY="${1#--key=}"; shift ;;
+    -h|--help) echo "Usage: $0 [--key FILE] user@host /path/to/inbound_final"; exit 0 ;;
+    *)         POS+=("$1"); shift ;;
+  esac
+done
+
+if [[ ${#POS[@]} -ne 2 ]]; then
+  echo "Usage: $0 [--key FILE] user@host /path/to/inbound_final"
   exit 1
 fi
-TARGET="$1"
-REMOTE_DIR="$2"
+TARGET="${POS[0]}"
+REMOTE_DIR="${POS[1]}"
+
+# ── identity: explicit -i wins, else ssh's own default/config ───────────────
+SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
+if [[ -n "$SSH_KEY" ]]; then
+  [[ -f "$SSH_KEY" ]] || { echo "✗ ssh key not found: $SSH_KEY"; exit 1; }
+  # IdentitiesOnly: offering many keys first hits the atom's MaxAuthTries and
+  # auth fails (the lesson already written into atoms.conf).
+  SSH_OPTS+=(-i "$SSH_KEY" -o IdentitiesOnly=yes)
+else
+  echo "⚠ no key given — relying on ssh's default identity/config."
+  echo "  If this target needs a dedicated key (atom01 does), pass it:"
+  echo "    $0 --key ~/.ssh/id_ed25519_atom01 $TARGET $REMOTE_DIR"
+fi
+
+# ── preflight: prove we can actually reach the target BEFORE shipping ───────
+# A deploy must never half-run because auth silently fell through.
+echo "→ checking ssh to $TARGET (${SSH_KEY:-ssh default identity})…"
+if ! ssh "${SSH_OPTS[@]}" "$TARGET" true; then
+  echo "✗ cannot ssh to $TARGET with the chosen identity — refusing to start a deploy"
+  exit 1
+fi
 
 DB="data/skopje-pois.db"
 [[ -f "$DB" ]] || { echo "✗ $DB not found — run scripts/update_map.sh first"; exit 1; }
@@ -85,10 +126,10 @@ tar czf "$PKG" "$DB" "$DB.sha256" 2>/dev/null || {
 }
 
 echo "→ uploading $PKG…"
-scp -q "$PKG" "$TARGET:/tmp/"
+scp -q "${SSH_OPTS[@]}" "$PKG" "$TARGET:/tmp/"
 
 echo "→ deploying on target (old DB backed up to skopje-pois.db.bak-$STAMP)…"
-ssh "$TARGET" "cd '$REMOTE_DIR' && \
+ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$REMOTE_DIR' && \
   cp data/skopje-pois.db data/skopje-pois.db.bak-$STAMP 2>/dev/null || true && \
   tar xzf /tmp/$PKG && \
   sha256sum -c <(sed 's|.*  |'\"$DB\"' |' /dev/null) >/dev/null 2>&1 || true; \
@@ -112,7 +153,7 @@ echo "→ restarting the TUI on target so it reopens the fresh DB (if one is run
 # `if ! ssh` — the script runs under `set -e`, so a bare failing ssh would abort
 # before any check could report WHY. The heredoc carries the remote logic; the
 # remote exit status is what decides success here.
-if ! ssh "$TARGET" bash -s "$REMOTE_DIR" <<'REMOTE'
+if ! ssh "${SSH_OPTS[@]}" "$TARGET" bash -s "$REMOTE_DIR" <<'REMOTE'
 set -u
 REMOTE_DIR="$1"
 cd "$REMOTE_DIR"

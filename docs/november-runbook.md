@@ -283,26 +283,29 @@ sqlite3 data/skopje-pois.db ".backup '/tmp/skopje-pois.db.november'"
 # 2. Ship to Atom 1 with checksum verification (refuses a broken map):
 #    <remote-dir> = the bot's inbound_final directory ON THE ATOM (confirm once with
 #    `ssh atom01 'ls -d ~/*/secretaries/inbound_final ~/inbound_final 2>/dev/null'`).
-scripts/deploy_map.sh atom01 <remote-dir>
+scripts/deploy_map.sh --key ~/.ssh/id_ed25519_atom01 atom01 <remote-dir>
 ```
 
 `deploy_map.sh` verifies the DB opens and has >1,000 POIs, writes a sha256 sidecar,
 backs up the target's old copy to `skopje-pois.db.bak-<stamp>`, extracts, and
 compares checksums — a mismatch restores the backup automatically.
 
+Pass the identity explicitly (`--key`, or `DEPLOY_MAP_SSH_KEY` in the environment).
+The script preflights the ssh connection and aborts if the chosen identity cannot
+authenticate, so a deploy can never look green while shipping nothing.
+
 Then restart the bot on the target and confirm the printed `[db:xxxxxxxx]` matches.
 
-> **Known blocker (2026-10-08):** `ssh atom01` fails with
-> `atom02@192.168.1.11: Permission denied (publickey,password)`. The host is up and
-> `~/.ssh/id_ed25519_atom01` exists locally, but its public key is not in the
-> atom's `authorized_keys`. **Fix before November** (one command on the atom):
-> ```bash
-> # from this machine
-> ssh-copy-id -i ~/.ssh/id_ed25519_atom01.pub atom01
-> # verify
-> ssh atom01 'hostname && node -v'
-> ```
-> `T60` (`t60hermes`, 192.168.1.20) authenticates fine and can be used meanwhile.
+> **Resolved (2026-10-12):** the 2026-10-08 blocker below no longer applies —
+> `~/.ssh/id_ed25519_atom01` is in the atom's `authorized_keys` and
+> `ssh -o BatchMode=yes atom01 'hostname'` returns `ATOM1`. The `Host atom01`
+> entry in `~/.ssh/config` also points at that key, but never rely on it:
+> `deploy_map.sh` now takes the key explicitly.
+>
+> *(Historical, kept for context)* 2026-10-08: `ssh atom01` failed with
+> `Permission denied (publickey,password)` because the public key was not yet on
+> the atom; the fix was `ssh-copy-id -i ~/.ssh/id_ed25519_atom01.pub atom01`.
+> `T60` (`t60hermes`, 192.168.1.20) authenticated fine throughout.
 
 ---
 
@@ -371,7 +374,7 @@ offline POI table by `place_id`).
 [ ]  8  osm rated ≥ 147  (the merge ran) ; queue = 0 (Phase C ran)
 [ ]  9  census --verify green ; suspect-pairs ; typecheck + tests
 [ ] 10  sqlite3 .backup → /tmp/skopje-pois.db.november
-[ ] 11  scripts/deploy_map.sh atom01 <path>  → checksum match
+[ ] 11  scripts/deploy_map.sh --key ~/.ssh/id_ed25519_atom01 atom01 <path>  → checksum match
 [ ] 12  atom: [db:xxxxxxxx] matches ; bot answers "76" with a landmark + pin
 [ ] 13  deploy public-properties v9 to QKGIO (NOT FREEBUFF) ; npm run build + pm2 restart
 ```
