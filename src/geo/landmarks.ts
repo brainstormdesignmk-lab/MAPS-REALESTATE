@@ -428,6 +428,48 @@ export function sanitizeLandmarkAnswer(raw: string, street?: string): string | u
   return s;
 }
 
+// ── CLIENT-TYPED PLACE WORDS ─────────────────────────────────────────────────
+// A client names a place the way people SAY it, not the way the map stores it:
+// definite forms („трговскиот“, „пазарчето“ — and the Latin keyboard twins
+// „trgovskiot“, „pazarceto“) plus ordinary plural forms. The POI table carries
+// the base names, so the definite article has to come off before the lookup.
+// TWO-CHARACTER articles are tried first: „трговскиот“ must strip to
+// „трговски“ (not to „трговск“), because the shorter stem is the one the map
+// indexes. A stem is never taken below 4 characters — „тато“ must not become
+// „та“ and match half the city.
+const DEFINITE_SUFFIXES = ['ot', 'ov', 'ta', 'to', 'te', 'та', 'то', 'те', 'от', 'ов',
+  'iot', 'ite', 'ata', 'oto', 'иот', 'ите', 'ата', 'ото'];
+
+/** The forms of a client-typed place word worth trying against the POI table:
+ *  the word itself, then the same word with its definite article removed.
+ *  Returns [] for anything too short to be a place name. */
+export function anchorWordForms(word: string): string[] {
+  const base = word.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, '').trim();
+  if (base.length < 3) return [];
+  const out = [base];
+  // THE ч/ц TWIN. Latin keyboards spell ч as "c" („pazarceto“) as often as
+  // "ch" („pazarcheto“); the script bridge only knows one of them, so the ч
+  // reading is offered as its own form. Bounded on purpose: only c before a
+  // front vowel, the position where Macedonian actually writes ч/ќ.
+  const chTwin = base.replace(/c(?=[ei])/g, 'ch');
+  if (chTwin !== base) out.push(chTwin);
+  // …and its Cyrillic side: the runtime hands this function NORMALIZED text
+  // („пазарцето“, from the client's „pazarceto“), where the same ч/ц choice is
+  // written ц. Both twins are offered; the original is always tried first.
+  const chTwinCyr = base.replace(/ц(?=[еи])/g, 'ч');
+  if (chTwinCyr !== base) out.push(chTwinCyr);
+  for (const w of [...out]) {
+    for (const suf of DEFINITE_SUFFIXES) {
+      if (!w.endsWith(suf)) continue;
+      const stem = w.slice(0, -suf.length);
+      if (stem.length < 4) continue;
+      out.push(stem);
+      break;
+    }
+  }
+  return [...new Set(out)];
+}
+
 export class LandmarkService {
   private store: LandmarkStore;
 
@@ -448,6 +490,39 @@ export class LandmarkService {
   findPlace(name: string, center?: { lat: number; lon: number }): { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined {
     if (!this.opts.offlineMap?.available) return undefined;
     return this.opts.offlineMap.findPoiByName(name, center);
+  }
+
+  /** A place word the CLIENT typed, resolved to a LOCAL anchor of a property —
+   *  the map's position for it, never further than maxM away.
+   *
+   *  WHY the two extra rules on top of findPlace():
+   *   1. CLIENTS WRITE THE DEFINITE FORM. „od stranata na trgovskiot ili odkaj
+   *      pazarceto“ ([01:29] capture) resolves to NOTHING as typed, while
+   *      „trgovski“ finds the mall. anchorWordForms() strips the article; the
+   *      map's own script bridge does the Latin/Cyrillic rest.
+   *   2. A NAME ALONE CAN BE ANOTHER NEIGHBOURHOOD. „pazarceto“ also matches
+   *      „пазарчето Тафталиџе“ 1.9 km away, and „trgovski“ matches „Трговски
+   *      Лисиче“ 5.5 km away. A side answer built on either would tell the
+   *      client their flat is on the side of a place two neighbourhoods over —
+   *      invented geography, which is exactly what the landmark rules exist to
+   *      prevent. Everything beyond maxM is therefore not an anchor of THIS
+   *      property, however well the name matches. */
+  findAnchor(word: string, center: { lat: number; lon: number }, maxM = 900):
+  { name: string; lat: number; lon: number; distance_m: number; place_id?: string } | undefined {
+    const map = this.opts.offlineMap;
+    if (!map?.available || !center || !Number.isFinite(center.lat) || !Number.isFinite(center.lon)) return undefined;
+    let best: { name: string; lat: number; lon: number; distance_m: number; place_id?: string } | undefined;
+    for (const form of anchorWordForms(word)) {
+      let hit: { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined;
+      try { hit = map.findPoiByName(form, center); } catch { hit = undefined; }
+      if (!hit || !Number.isFinite(hit.lat) || !Number.isFinite(hit.lon)) continue;
+      const d = Math.round(_distM(center.lat, center.lon, hit.lat, hit.lon));
+      if (d > maxM) continue;
+      if (!best || d < best.distance_m) {
+        best = { name: hit.name, lat: hit.lat, lon: hit.lon, distance_m: d, place_id: hit.place_id };
+      }
+    }
+    return best;
   }
 
   /** Resolve the approximate location for a property. Cached in the DB after
