@@ -585,7 +585,7 @@ async function phaseB(db: Database.Database): Promise<number> {
 // IDENTIFIED Google anchor adopts Google's exact coordinates + place_id.
 // This is the merge doing BY IDENTITY what the override file used to do BY
 // HAND; wrong-pin-near-right-pin stops being a bug class.
-function phaseB2(db: Database.Database): number {
+export function phaseB2(db: Database.Database): number {
   log('PHASE B2: Identity propagation (OSM ← Google anchors, bilingual)');
   const stripped = stripBlindFusions(db);
   const { healed } = identityHeal(db);
@@ -1009,6 +1009,23 @@ async function main(): Promise<number> {
   return 0;
 }
 
-main()
-  .then(code => process.exit(code))
-  .catch(e => { console.error(e); process.exit(1); });
+// ── ENTRY-POINT GUARD ────────────────────────────────────────────────────────
+// Importing this module must NEVER start a pass. tmp/ probes and tests import
+// { phaseB2 } to work on a COPY of the map — and before this guard that import
+// ran main(): on 2026-10-15 a read-only probe launched the whole pipeline (it
+// drained the runtime queue for real), and in a month with budget it would have
+// spent the pass. `tmp/run-b2.ts` had the same shape. The CLI runs only when
+// this file IS the entry point; on import it does nothing, silently.
+const RUN_AS_CLI = (() => {
+  try {
+    // `require`/`module` exist in the CommonJS output tsx produces for scripts/.
+    return typeof require !== 'undefined' && typeof module !== 'undefined'
+      && require.main === module;
+  } catch { return false; }
+})();
+
+if (RUN_AS_CLI) {
+  main()
+    .then(code => process.exit(code))
+    .catch(e => { console.error(e); process.exit(1); });
+}

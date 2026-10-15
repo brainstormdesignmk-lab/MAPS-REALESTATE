@@ -663,6 +663,26 @@ slots — while `suspect-pairs` reported **134 suspects and named Montenegro zer
 times**. Add a bucket: *same normalized name within ~50 m where exactly one side
 carries a `place_id`* (the identity-blind twin), so this cannot recur unseen.
 
+### E. A probe can no longer start a pass — **FIXED 2026-10-15** (0 searches)
+
+`scripts/refresh-monthly.ts` ran `main()` at import time, so **any** `tmp/` probe
+that imported it launched the whole pipeline: on 2026-10-15 a supposedly
+read-only probe did Phase A and then **drained the runtime queue for real** — and
+in a month with budget it would have spent the pass. Two things were wrong:
+
+- the CLI now runs **only when the file is the entry point** (`require.main ===
+  module`); importing it is inert and silent;
+- `phaseB2` **was never exported**, so those probes were calling `undefined(db)` —
+their only real effect was that accidental pass. It is exported now.
+
+`tmp/run-b2.ts` is the reference probe: it heals a **copy** by default and needs
+an explicit `--write` to touch the live map.
+
+**Verified:** importing the module leaves the map sha **and** the queue row count
+unchanged (idle); `npx tsx tmp/run-b2.ts` healed a copy (39 rows) with the live
+map's sha unchanged. Any future probe that needs the map must follow that shape —
+copy first, `--write` to mean it.
+
 ---
 
 ## 12. ONE-PAGE CHECKLIST
@@ -685,6 +705,7 @@ carries a `place_id`* (the identity-blind twin), so this cannot recur unseen.
 [x] 15  §11.B  DONE 2026-10-15 (1 search) — reviews 7 / rating 4.1 captured, card served
 [x] 16  §11.C  DONE 2026-10-15 — --rescan floor 1 ; both 0-pair doors exit 1 (verified free)
 [ ] 17  §11.D  suspect-pairs flags identity-blind twins (one pid, one pid-less, same coords)
+[x] 18  §11.E  DONE 2026-10-15 — importing refresh-monthly starts nothing; probes heal a copy only
 ```
 
 **Expected totals for November:** ~510–520 searches (**~2.1 keys** of the 2,000
