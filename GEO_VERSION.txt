@@ -9,6 +9,7 @@ e2d669def829e0ed75ff75600fcbb373  src/geo/poisonSweep.ts
 f0b39d9817cabca8aac5fdb7680b4db5  src/geo/runtimeDb.ts
 faace1eb4591922933fdaed3168d8521  src/geo/runVerify.ts
 b38dbe142f74df6159d7a5565769f614  src/geo/serpCapture.ts
+0e8a8958b662d5f6fb0349b117e3eab7  src/geo/spendGate.ts
 02f141b876a21c4734664dbf8bc672b4  src/geo/streetCensus.ts
 bbe4f5da9c0626d4d7e860206d292394  src/geo/tileCoverage.ts
 c632e3bfc005f07f9e2c0049fbc218b7  src/geo/types.ts
