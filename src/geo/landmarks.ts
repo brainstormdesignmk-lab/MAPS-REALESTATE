@@ -70,6 +70,63 @@ export interface PropertyRow {
   /** Feed description text — present only when callers pass the full
    *  property (whereIsReply does); enables the feed landmark-pair top-up. */
   details?: string | null;
+  /** The property's OWN ranked landmark list (Ана's import-time resolution,
+   *  stored next to the property in Supabase). When present it IS the rotation
+   *  — see nearbyLandmarks (fix-list item 3). Present only when the caller
+   *  passes the full Property (every handler lane does; whereIsReply carries
+   *  it explicitly). */
+  landmarks?: FeedLandmark[];
+}
+
+/** The rotation's size: L1 → L2 → L3 ("каде?" → "што уште има во близина?").
+ *  Matches FEED_LANDMARK_COUNT, the length of the feed's own list. */
+const ROTATION_SLOTS = 3;
+
+/** Rotation slots from the FEED's curated landmark list — the list the agency
+ *  page itself shows, resolved once at import, ranked and distance-capped
+ *  there (fix-list item 3).
+ *
+ *  Each entry's own point is used when its link pins one (?q= / @form);
+ *  otherwise the map row behind the name supplies the point and the place
+ *  identity — the roster was BUILT from that map pool, so a name the map no
+ *  longer knows is a stale roster entry, and an entry we cannot point at is
+ *  not a claim the chat may make (drop it; the caller falls back to the map
+ *  scan only when the WHOLE roster is unpinnable). */
+function feedRosterSlots(
+  p: PropertyRow,
+  map: OfflineMapStore | undefined,
+  center: Center,
+): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
+  const out: Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
+  const seen = new Set<string>();
+  const near = center.lat && center.lon ? { lat: center.lat, lon: center.lon } : undefined;
+  for (const e of p.landmarks ?? []) {
+    if (out.length >= ROTATION_SLOTS) break;
+    const name = String(e?.landmark ?? '').trim();
+    if (!name) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue; // one place, one slot (the feed can carry a dupe)
+    const pin = coordsFromMapsUrl(e?.maps_url);
+    let lat = pin?.lat;
+    let lon = pin?.lon;
+    let place_url: string | undefined;
+    let place_id: string | undefined;
+    if (map?.available) {
+      const poi = map.findPoiByName(name, near);
+      if (poi) {
+        if (lat == null || lon == null) { lat = poi.lat; lon = poi.lon; }
+        place_url = poi.place_url;
+        place_id = poi.place_id;
+      }
+    }
+    if (lat == null || lon == null) {
+      try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" not pinnable (stale roster entry)\n`); } catch {}
+      continue;
+    }
+    seen.add(key);
+    out.push({ landmark: name, lat, lon, place_url, place_id });
+  }
+  return out;
 }
 
 export function centerTrusted(geoSource: string | null | undefined): boolean {
@@ -110,7 +167,7 @@ export function googleMapsLink(query: string): string {
 }
 
 // Re-export precision utilities for callers (handler, scripts)
-import { distM as _distM, propertyAreaLink, fullCoordsLink, landmarkLink } from './precision';
+import { distM as _distM, propertyAreaLink, fullCoordsLink, landmarkLink, coordsFromMapsUrl } from './precision';
 import { typeRank } from './types';
 export { propertyAreaLink, fullCoordsLink, landmarkLink };
 
@@ -734,6 +791,24 @@ export class LandmarkService {
           `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
         ).run(p.id, 'low_confidence_center', new Date().toISOString());
       } catch {}
+    }
+
+    // ── FEED ROSTER FIRST (fix-list item 3) ────────────────────────────────
+    // The property's own curated list is the answer whenever it exists: it is
+    // what the agency's page shows, ranked and distance-capped at import time,
+    // and every entry came from this same map. Rotating freshly-scanned POIs
+    // while a curated roster sits right there is how the chat and the page came
+    // to disagree (EB 76: the page's Капиштец entry vs the map's embassy row).
+    // The scan below is the FALLBACK — for a property the feed has not placed
+    // yet, or whose whole roster is stale (unpinnable). NOTE: the roster does
+    // not need a trusted center — it was validated against the property's own
+    // address at import — so it also serves the low-confidence rows the grace
+    // floor below can only approximate.
+    const roster = feedRosterSlots(p, this.opts.offlineMap, center);
+    if (roster.length > 0) {
+      try { dbgLog(
+        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED ${roster.map(r => r.landmark).join(', ')}\n`); } catch {}
+      return roster;
     }
 
     if (!center.trusted) {

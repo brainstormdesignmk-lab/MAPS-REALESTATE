@@ -82,6 +82,28 @@ export function fullCoordsLink(lat: number, lon: number): string {
   return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
 }
 
+/** The POINT a maps link pins, when the link carries one: the coordinate-pin
+ *  form (`?q=lat,lon`, fullCoordsLink) and the viewport form
+ *  (`@lat,lon,zoom`, propertyAreaLink). A place-CARD link (`?cid=…`, a stored
+ *  /maps/place/… URL) names a place but carries NO coordinate → undefined.
+ *
+ *  Used by the landmark rotation (from the FEED ROSTER, fix-list item 3): a
+ *  curated entry's own pin is the point the feed validated, so the rotation
+ *  serves THAT point instead of re-deriving one from the map. */
+export function coordsFromMapsUrl(url: string | undefined | null): { lat: number; lon: number } | undefined {
+  const u = String(url ?? '');
+  if (!u) return undefined;
+  const m = u.match(/[?&]q=(-?\d+(?:\.\d+)?)(?:,\s*|%2C)(-?\d+(?:\.\d+)?)/i)
+    ?? u.match(/@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/);
+  if (!m) return undefined;
+  const lat = Number(m[1]);
+  const lon = Number(m[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return undefined;
+  // (0,0) is the Gulf of Guinea, never Skopje — an unset pin, not a location.
+  if (lat === 0 && lon === 0) return undefined;
+  return { lat, lon };
+}
+
 // Landmark link — priority order (revised 2026-10-13, the [23:50] capture):
 //   1. A stored google.com/maps URL (canonical place_url from the capture
 //      script) — emitted verbatim, original Google.
