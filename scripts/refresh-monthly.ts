@@ -125,6 +125,9 @@ let keyIdx = 0;
 // = that key's remaining searches (-1 = not yet probed).
 let serpApiLeft = 0;
 const keyLeft: number[] = SERPAPI_KEYS.map(() => -1);
+/** Pairs Phase B actually searched on the last run. 0 means nothing was even
+ *  attempted — a --rescan that changed nothing, which must not report success. */
+let phaseBScans = 0;
 
 async function refreshBudget(): Promise<number> {
   let total = 0;
@@ -447,6 +450,13 @@ async function phaseB(db: Database.Database): Promise<number> {
     + (SEARCH_LIMIT !== Infinity ? `, capped at ${SEARCH_LIMIT}` : ''));
   if (pairs.length === 0) {
     log('  ✓ Every tile × category already scanned — nothing to spend');
+    // A --rescan whose list filtered down to nothing is a MISTAKE (wrong
+    // category, malformed tile, empty file) — say so, do not report success.
+    if (RESCAN_FILE) {
+      // 0, not a sentinel: `inserted` is a COUNT the caller logs verbatim. The
+      // non-zero exit comes from the rescan summary (phaseBScans === 0).
+      log('=== RESCAN DID NOTHING — the pair list resolved to 0 pair(s) (exit 1) ===');
+    }
     return 0;
   }
 
@@ -477,14 +487,20 @@ async function phaseB(db: Database.Database): Promise<number> {
   );
   let spent = 0;
   let consecutiveMisses = 0;
+  // A --rescan list is EXPLICIT and bounded — one search per named pair — so it
+  // gets a floor of 1: a one-pair repair must be runnable on an account with a
+  // handful of searches left. The 20-search floor stays for the GRID pass,
+  // where stopping early is the correct trade. On 2026-10-15 the grid floor
+  // silently turned a 1-pair embassy repair into a no-op that still exited 0.
+  const runFloor = RESCAN_FILE ? 1 : BUDGET_FLOOR;
   for (const { tile, category: q } of pairs) {
-    if (serpApiLeft < BUDGET_FLOOR) {
+    if (serpApiLeft < runFloor) {
       // The local counter can drift BELOW the truth (a stale keyLeft from a
       // failed /account probe reads as 0). On 2026-10-08 that phantom "19
       // left" abandoned ~740 real searches. /account is free — re-probe
       // before giving up budget.
       await refreshBudget();
-      if (serpApiLeft < BUDGET_FLOOR) {
+      if (serpApiLeft < runFloor) {
         log(`  ⚠ Quota low (${serpApiLeft} left) — stopping SerpApi top-up`);
         break;
       }
@@ -551,6 +567,7 @@ async function phaseB(db: Database.Database): Promise<number> {
     }
   }
 
+  phaseBScans = spent;
   log(`  Inserted ${inserted} new Google POIs, backfilled ${identityBackfilled} rows (${enriched} with capture fields) (SerpApi left: ${serpApiLeft})`);
   return inserted;
 }
@@ -930,8 +947,16 @@ async function main(): Promise<number> {
   if (RESCAN_FILE) {
     log('=== Rescan summary (Phase B only) ===');
     log(`  Google inserted: ${googleInserted}`);
+    log(`  Pairs actually searched: ${phaseBScans}`);
     log(`  SerpApi remaining: ${serpApiLeft}`);
     db.close();
+    // A repair that repaired nothing is a FAILURE, not a success. On
+    // 2026-10-15 this run recorded 0 pairs, spent 0 searches and exited 0, so
+    // a blocked repair looked identical to a completed one.
+    if (phaseBScans === 0) {
+      log('=== RESCAN DID NOTHING — no pair was searched, nothing was repaired (exit 1) ===');
+      return 1;
+    }
     return 0;
   }
 

@@ -571,9 +571,9 @@ the intended trade — a property that cannot be placed stays honestly labelled
 All four come from the 2026-10-15 repair session and the live chat it diagnosed:
 a client asking about EB 76 was told "во близина на Амбасада на Црна Гора" **with
 a raw `?q=` pin**, and given three different landmarks for one flat across three
-questions. **A is done on the workstation but not yet shipped** (that is why the
-run is not flawless yet); **B, C and D are still open** — each is either a
-paid-for defect sitting in the artifact or a guard that failed to catch it.
+questions. **A, B and C are done and verified on the workstation** — A still has
+to be SHIPPED (§8), which is why the run is not flawless yet. **D is still open**:
+the diagnostic that should have caught this cannot see it.
 
 > **The artifact changed on 2026-10-15:** one row restored (§11.A), so §1's
 > measured table (5,990 POIs, sha `7f8554e9c670`) is the **2026-10-14** reading.
@@ -611,28 +611,44 @@ printf '[{"tile":"42.00,21.42","category":"embassy"}]' > /tmp/embassy-pair.json
 npx tsx scripts/refresh-monthly.ts --rescan=/tmp/embassy-pair.json
 ```
 
-**Acceptance:** `SELECT review_count, rating FROM pois WHERE
-place_id='0x1354144841501047:0x71a2f884c5dc3050'` is non-NULL, and the embassy
-serves at slot 3 for EB 76 instead of slot 8.
+**DONE 2026-10-15** (1 search, after §11.C.1 landed). The pair was re-scanned and
+`backfilled 20 rows`, including the anchor itself:
 
-**Blocker — read this before you try it:** `--rescan` obeys `BUDGET_FLOOR`, so
-with fewer than 20 searches in total it prints `⚠ Quota low`, inserts **0** and
-exits **0**. That is exactly what happened on 2026-10-15 (13 searches left). Run
-this after the November reset, or after §11.C.1.
+```
+rowid 21044  Embassy of Montenegro  place_id 0x1354144841501047:0x71a2f884c5dc3050
+             review_count 7   rating 4.1   phone +389 2 322 7277   types ["Embassy"]
+paired entry served for EB 76:  Амбасада на Црна Гора  80m  pid=yes
+                                ?cid=8188380321651896400   reviews 7
+```
 
-### C. Two code defects this exposed — fix before the grid pass (0 searches)
+Acceptance met: `review_count`/`rating` are non-NULL (they were the whole
+point), the pair serves ONE entry with a place card, `duplicate place_id` stayed
+**0**, `integrity_check ok`, POIs still 5,991, and the ledger pair went `scans 1 → 2`.
 
-1. **`BUDGET_FLOOR` blocks explicit repairs.** The floor is right for the grid
-   pass and wrong for a named 1-pair repair. Give `--rescan` its own floor
-   (1), or bypass the floor when the pair list is explicit. Today a bounded
-   repair is impossible on a nearly-spent account.
-2. **A no-op repair exits 0.** The 2026-10-15 rescan spent 0 searches, recorded
-   0 pairs and still exited **0** (`=== Rescan summary === … Inserted 0`). A
-   repair that repaired nothing must exit non-zero, so this class of silent
-   no-op can never be mistaken for success again.
+**Correction to this runbook's own prediction:** the earlier text here said the
+embassy would climb to rotation **slot 3** — that was measured with a
+*simulated* 106 reviews. Its real count is **7**, so prominence puts it at slot
+**8 → 6** (ahead of Bosnia ×5 and Feng Shui ×4, behind the 106-review Bulgarian
+embassy 172 m further out). That ordering is the prominence rule working
+correctly: the 80 m embassy is not the most famous thing in that block. Do not
+"fix" it by boosting the row.
 
-**Acceptance for both:** with no usable key, `--rescan` of one pair exits **1**
-with a message saying nothing was scanned.
+### C. Two code defects this exposed — **FIXED 2026-10-15** (0 searches)
+
+1. **`BUDGET_FLOOR` blocked explicit repairs.** A `--rescan` list is explicit and
+   bounded (one search per named pair), so it now gets a floor of **1**; the
+   20-search floor stays for the GRID pass, where stopping early is correct.
+   Verified: with **13** searches left, the 1-pair embassy rescan ran
+   (`Pairs actually searched: 1`, SerpApi 13 → 12) — the same command had been a
+   silent no-op an hour earlier.
+2. **A no-op repair exited 0.** A repair that repaired nothing now exits **1**
+   from two doors, both verified live and both spending nothing:
+   ```
+   --rescan=[]                          → RESCAN DID NOTHING … (exit 1)
+   --rescan=[{category:"not-a-category"}] → RESCAN DID NOTHING … (exit 1)
+   ```
+   (Also: the summary now prints `Pairs actually searched: N`, so a run's own log
+   says whether anything happened.)
 
 ### D. `suspect-pairs` is blind to the bug that reached the client
 
@@ -666,8 +682,8 @@ carries a `place_id`* (the identity-blind twin), so this cannot recur unseen.
 [ ] 12  atom: [db:xxxxxxxx] matches the §5 run's sha256 prefix ; bot answers "76" with a landmark + pin
 [ ] 13  HERMES_API_KEY=… npm run deploy:supabase (refuses a wrong-linked checkout) → npm run verify:feed green
 [ ] 14  bot: npm run build + pm2 restart
-[ ] 15  §11.B  rescan the embassy pair (1 search) → reviews/rating non-NULL, embassy at slot 3
-[ ] 16  §11.C  --rescan bypasses the budget floor ; a 0-search repair exits non-zero
+[x] 15  §11.B  DONE 2026-10-15 (1 search) — reviews 7 / rating 4.1 captured, card served
+[x] 16  §11.C  DONE 2026-10-15 — --rescan floor 1 ; both 0-pair doors exit 1 (verified free)
 [ ] 17  §11.D  suspect-pairs flags identity-blind twins (one pid, one pid-less, same coords)
 ```
 
