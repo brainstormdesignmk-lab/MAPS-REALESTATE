@@ -41,6 +41,27 @@ fi
 TARGET="${POS[0]}"
 REMOTE_DIR="${POS[1]}"
 
+# ── arg shape: the PROJECT dir, not the DB's own directory ────────────────
+# Every path below is relative to REMOTE_DIR (`cp data/skopje-pois.db …`,
+# `tar xzf …` which carries `data/skopje-pois.db`), so REMOTE_DIR must CONTAIN
+# data/. Pass the data dir and the tar extracts to .../data/data/skopje-pois.db,
+# the checksum is then verified against THAT nested file, and the deploy prints
+# "✅ checksum match" while the map the bot reads is untouched — which is exactly
+# what happened on 2026-10-15 (atom01 stayed on the old map for 8 minutes while
+# the log said success). Refusing here is the only place that can catch it.
+if [[ "$REMOTE_DIR" == */data || "$REMOTE_DIR" == */data/ ]]; then
+  echo "✗ REMOTE_DIR looks like a data/ directory: $REMOTE_DIR"
+  echo "  Pass the PROJECT directory that contains data/ instead, e.g."
+  echo "    $0 --key ~/.ssh/id_ed25519_atom01 $TARGET /home/atom/Documents/PROJECTS/maps-realestate"
+  exit 1
+fi
+if [[ "$REMOTE_DIR" == *\'* || "$REMOTE_DIR" == *" "* ]]; then
+  # The remote commands single-quote this value; a quote in it would silently
+  # break them. Refuse rather than ship something the remote cannot parse.
+  echo "✗ REMOTE_DIR must not contain a quote or a space: $REMOTE_DIR"
+  exit 1
+fi
+
 # ── identity: explicit -i wins, else ssh's own default/config ───────────────
 SSH_OPTS=(-o BatchMode=yes -o ConnectTimeout=8)
 if [[ -n "$SSH_KEY" ]]; then
