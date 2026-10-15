@@ -108,23 +108,35 @@ echo "gate exit=$?"        # ← 0 = GO, 1 = DO NOT START
 ```
 
 The dry run is no longer something you *read*; it is a **gate**. It refuses
-(exit 1) when the pass cannot fit the keys on disk, so a run can never start
-that is guaranteed to stop half-finished. Read the first three lines to confirm
-which map you are about to change, then the plan:
+(exit 1) when the pass cannot fit **what the accounts actually hold** — it now
+probes `/account` (free, 0 searches) instead of trusting the nominal
+`keys × 250`, which is the check that used to pass with 13 searches left and let
+a run exit 0 with 510 pairs open. Read the first three lines to confirm which map
+you are about to change, then the plan:
 
 ```
 Cadence: COMPLETE pass (the default) — 15 categories
 Canonical queue: …/data/lina.db (repo-anchored)
-Map: …/data/skopje-pois.db (absolute) sha256:7f8554e9c670 3.9MB
+Map: …/data/skopje-pois.db (absolute) sha256:09069dbc3899 3.9MB
   Cadence: COMPLETE pass (the default) — 15 categories
   Unscanned pairs (tiles touched: 36): 510
   ESTIMATED SEARCHES to finish the pass: 510
+  Keys loaded: 8 (free plan = 250 each)
+  Budget now (free /account probe): 2000 search(es) left across 8 key(s)
   Budget ceiling (keys on disk × 250): 2000
+  Budget floor per run: 20 searches (hard stop)
+  ✓ This pass fits: 510 of 2000 available now
 ```
 
 **Abort if:** the cadence line does not say **COMPLETE pass**, the `Map:` path is
-not the file you expect, or `ESTIMATED SEARCHES` exceeds the ceiling (the gate
-will already have failed you out).
+not the file you expect, the probe line says **UNVERIFIED** (offline — no reading
+was possible), or there is no `✓ This pass fits` line. The gate already exits 1
+on all of those, and its refusal names both numbers:
+
+```
+  ✗ This pass needs 510 search(es); the accounts hold 13.
+    Re-key first, wait for the monthly reset, or size a partial pass explicitly with --limit=N.
+```
 
 > There is no `--full` to remember any more. If you find yourself typing it, you
 > are following an older runbook — it is harmless but unnecessary.
@@ -490,8 +502,14 @@ npm run cron:remove    # strips every forbidden line; idempotent
 npm run cron:install   # REFUSES, and prints the manual commands instead
 ```
 
-Run `cron:check` on **every** machine you have an account on — hub, workstation,
-each atom — and after any restore from an old image. On the fleet it is automatic:
+Run `cron:check` on **every** machine you have an account on — workspace, each
+atom — and after any restore from an old image. **`--require-sync` only means
+something on a BOT.** It asserts the 5-minute owner sync is installed, and that
+job deliberately lives on the atom (it is the only writer that reaches the app),
+so running it on the workstation correctly reports `MISSING` and exits 1:
+verified 2026-10-15 — workstation fails `--require-sync`, atom01 carries the line
+and passes. Use plain `cron:check` (exit 0 = COMPLIANT) on non-bot machines; use
+`cron:check --require-sync` on the bots. On the fleet it is automatic:
 `npm run atoms:deploy` (bot repo) removes MAP jobs from every atom **and
 re-installs the owner sync if it is missing** — that is the one line a deploy may
 write, because its absence is the defect.
