@@ -1,6 +1,11 @@
 #!/usr/bin/env tsx
 /**
- * healthcheck.ts — daily read-only state snapshot (cron: 0 5 * * *).
+ * healthcheck.ts — read-only state snapshot. MANUAL: `npm run health`.
+ *
+ * NO CRONS (2026-10-14): the `0 5 * * *` line is gone. Read-only as it is, it
+ * was still a timer nobody asked for, and the no-cron policy has no carve-out
+ * for harmless ones — a schedule you forget about is how the last accidental
+ * job got installed.
  *
  * Logs the health of the geo system into logs/health.log so a month of cron
  * logs can prove fire-and-forget: POI counts by source, landmark-cache tiers,

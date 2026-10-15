@@ -24,8 +24,9 @@
     "health": "tsx scripts/healthcheck.ts",
     "backfill": "tsx scripts/backfill-geo.ts",
     "place-urls": "tsx scripts/capture-place-urls.ts",
-    "cron:install": "tsx scripts/install-cron.ts --install",
     "cron:check": "tsx scripts/install-cron.ts --check",
+    "cron:remove": "tsx scripts/install-cron.ts --remove",
+    "cron:install": "tsx scripts/install-cron.ts --install",
     "backup": "tsx scripts/backup.ts",
     "backup:serve": "tsx scripts/serve-backup.ts",
     "backup:restore": "tsx scripts/restore.ts"

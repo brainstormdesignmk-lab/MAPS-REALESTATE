@@ -1,13 +1,34 @@
 #!/usr/bin/env tsx
 /**
- * refresh-monthly.ts — Monthly POI refresh + queue drain + poison sweep.
+ * refresh-monthly.ts — the ONE map-pass entry point. No flags are required for
+ * a correct run. MANUAL: nothing schedules it (see scripts/cron-policy.ts).
+ *
+ * NO CRONS (2026-10-14): the name says "monthly" because it used to be a cron
+ * line on the hub. It is not any more. The map is a FIXED ARTIFACT — this runs
+ * when a human runs it, and the map is unchanged until then. SerpApi is spent
+ * only because somebody asked for it, in this command.
  *
  * PHASE A: OSM restore (free) — Overpass query, Skopje bbox
- * PHASE B: SerpApi top-up (budget ≤ 80 searches/month)
- * PHASE C: Queue drain — re-resolve queued properties offline
- * PHASE D: Poison sweep — re-check low-confidence landmarks
+ * PHASE B: SerpApi top-up — COMPLETE pass is the default, ledger-gated
+ * PHASE B2: identity propagation (OSM ← Google anchors)
+ * PHASE B3: map self-learning (teach unknown streets)
+ * PHASE C: queue drain — harvest every stray queue, then re-resolve
+ * PHASE D: poison sweep — re-check low-confidence landmarks
+ * VERIFY: the invariants, enforced — see the EXIT CODE below
  *
- * Crontab: 0 4 1 * * cd /srv/app && npx tsx scripts/refresh-monthly.ts >> logs/refresh.log 2>&1
+ * Manual:  npm run refresh            (from the repo that owns the map)
+ *          npm run cron:check         (prove no schedule has crept back)
+ *
+ * EXIT CODE — the run's exit status MEANS something:
+ *   0 = every invariant held; the map is shippable
+ *   1 = VERIFY failed (or the dry-run pre-flight says the pass cannot fit the
+ *       keys on disk); this run is NOT shippable
+ *   2 = environment error (map file missing / unreadable) — nothing was done
+ *
+ * Every path this run depends on is resolved against the REPO, never the
+ * working directory: the map (resolveMapDb), the queue (resolveRuntimeDb) and
+ * the key files. A cron `cd`, an ssh'd shell or a symlinked cwd cannot make it
+ * read or write a different map than the operator expects.
  */
 
 import '../src/compat/node16';
@@ -16,18 +37,54 @@ import Database from 'better-sqlite3';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
 import { distM } from '../src/geo/precision';
 import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../src/geo/geocodeGuard';
+import { categoriesForRun } from '../src/geo/serpCapture';
+import { planCoverage, seedTileScansFromPois } from '../src/geo/tileCoverage';
+import { verifyMapDb } from '../src/geo/runVerify';
 import { identityHeal } from './identity-heal';
 import { stripBlindFusions } from './strip-blind-fusions';
+import {
+  REPO_ROOT, resolveRuntimeDb, resolveMapDb, harvestQueues,
+  type ResolvedRuntimeDb, type ResolvedMapDb,
+} from '../src/geo/runtimeDb';
 
 // Load env from ~/.lina/lina.env (SUPABASE_URL/KEY, DB_PATH, SKOPJE_POIS_DB)
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
 const SKOPJE_BBOX = '(41.95,21.35,42.05,21.50)';
-const POIS_DB = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
-const LINA_DB = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'lina.db');
+
+// THE MAP FILE — the same cwd-independent rule as the queue, and for a sharper
+// reason: this is the artifact the whole run produces. `process.cwd() + '/data/
+// skopje-pois.db'` meant a cron `cd`, an ssh'd shell or a symlinked cwd opened
+// — and, because SQLite CREATES a missing file, silently built — a DIFFERENT
+// map, spent the month's SerpApi budget into it, and printed a successful
+// summary while the authoritative map sat untouched.
+const MAP_DB: ResolvedMapDb = resolveMapDb();
+const POIS_DB = MAP_DB.file;
+
+/** The hard budget floor every phase stops at (one constant, one meaning). */
+const BUDGET_FLOOR = 20;
+
+/** Repo-rooted first, cwd second: a cron run must find its key files without
+ *  depending on the shell's working directory. */
+function repoFile(rel: string): string {
+  const rooted = path.join(REPO_ROOT, rel);
+  return fs.existsSync(rooted) ? rooted : rel;
+}
+
+// THE CANONICAL QUEUE — Phase C drains ONE file, and it is decided here once.
+// DB_PATH is a RELATIVE string in ~/.lina/lina.env ('data/lina.db'), so the old
+// rule (`DB_PATH ?? process.cwd() + '/data/lina.db'`) meant the drain opened a
+// DIFFERENT database for every working directory: two checkouts × two cwd's
+// fragmented geo_reresolve_queue into four copies, and rows queued anywhere
+// else (EB 74 sat in tui.db from 13 Sept) were never drained at all.
+// See src/geo/runtimeDb.ts — resolve once, cwd-independently, then harvest
+// every stray copy into this file before the drain.
+const RUNTIME_DB: ResolvedRuntimeDb = resolveRuntimeDb();
+const LINA_DB = RUNTIME_DB.file;
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
@@ -40,12 +97,14 @@ function log(msg: string) {
 function loadSerpApiKeys(): string[] {
   const keys: string[] = [];
   if (process.env.SERPAPI_KEY) keys.push(process.env.SERPAPI_KEY);
-  if (fs.existsSync('data/serpapi-key.txt')) {
-    const k = fs.readFileSync('data/serpapi-key.txt', 'utf8').trim();
+  const serpFile = repoFile('data/serpapi-key.txt');
+  if (fs.existsSync(serpFile)) {
+    const k = fs.readFileSync(serpFile, 'utf8').trim();
     if (k && !keys.includes(k)) keys.push(k);
   }
-  if (fs.existsSync('GOOGLEMAPS_API_KEY.txt')) {
-    const lines = fs.readFileSync('GOOGLEMAPS_API_KEY.txt', 'utf8').split('\n');
+  const gmapsFile = repoFile('GOOGLEMAPS_API_KEY.txt');
+  if (fs.existsSync(gmapsFile)) {
+    const lines = fs.readFileSync(gmapsFile, 'utf8').split('\n');
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed || /^[A-Z]/.test(trimmed)) continue;
@@ -353,7 +412,7 @@ async function phaseA(db: Database.Database): Promise<number> {
 async function phaseB(db: Database.Database): Promise<number> {
   const { categoriesForRun, capturePoi, insideSkopjeBbox } = await import('../src/geo/serpCapture');
   const cats = categoriesForRun(RUN_FLAG);
-  log(`PHASE B: SerpApi top-up — ${cats.length} categories (${RUN_FLAG ?? 'auto: ' + (cats.length > 2 ? 'FULL' : 'LIGHT')})`);
+  log(`PHASE B: SerpApi top-up — ${cats.length} categories (cadence: ${RUN_FLAG === '--light' ? 'light (--light)' : 'COMPLETE — the default'})`);
 
   if (SERPAPI_KEYS.length === 0) {
     log('  No SerpApi keys — skipping');
@@ -418,13 +477,13 @@ async function phaseB(db: Database.Database): Promise<number> {
   let spent = 0;
   let consecutiveMisses = 0;
   for (const { tile, category: q } of pairs) {
-    if (serpApiLeft < 20) {
+    if (serpApiLeft < BUDGET_FLOOR) {
       // The local counter can drift BELOW the truth (a stale keyLeft from a
       // failed /account probe reads as 0). On 2026-10-08 that phantom "19
       // left" abandoned ~740 real searches. /account is free — re-probe
       // before giving up budget.
       await refreshBudget();
-      if (serpApiLeft < 20) {
+      if (serpApiLeft < BUDGET_FLOOR) {
         log(`  ⚠ Quota low (${serpApiLeft} left) — stopping SerpApi top-up`);
         break;
       }
@@ -523,6 +582,20 @@ function phaseB2(db: Database.Database): number {
 async function phaseC(): Promise<number> {
   log('PHASE C: Queue drain');
 
+  // ONE QUEUE FIRST. The queue table is written by every runtime that touches
+  // geo data (geo-watcher, the bot's importGeo, this script's own poison
+  // sweep) but only this phase drains it — and until now each writer resolved
+  // DB_PATH against its own cwd, so 'the queue' was really four files and only
+  // one of them got drained. Merge the strays into the canonical file FIRST,
+  // then drain that: a row queued anywhere is now drained here. Idempotent —
+  // nothing to do prints nothing.
+  const harvest = harvestQueues(LINA_DB);
+  if (harvest.merged > 0 || harvest.cleared > 0) {
+    log(`  Harvested ${harvest.merged} stray row(s) into ${LINA_DB}; ${harvest.cleared} redundant cop${harvest.cleared === 1 ? 'y' : 'ies'} cleared`);
+    for (const r of harvest.rows) log(`    + EB ${r.propertyId} (${r.reason}) ← ${r.from}`);
+  }
+  for (const s of harvest.skipped) log(`  ⚠ queue source ${s.file}: ${s.why}`);
+
   // The queue + landmarks cache live in the runtime DB (src/store/db schema).
   const { Db } = await import('../src/store/db');
   const runtimeDb = new Db(LINA_DB);
@@ -573,6 +646,9 @@ async function phaseC(): Promise<number> {
   log(`    landmarks re-cached: ${result.landmarkCached}`);
   if (result.budgetStopped > 0) {
     log(`  ⚠ Budget low — ${result.budgetStopped} rows left queued for next month`);
+  }
+  if (harvest.kept > 0 || harvest.alreadyImported > 0) {
+    log(`  Queue sources: ${harvest.kept} atom-snapshot row(s) mirrored, ${harvest.alreadyImported} already imported (import ledger — no re-spend)`);
   }
   log(`  Queue now: ${result.leftInQueue} rows`);
 
@@ -716,8 +792,24 @@ async function phaseB3(): Promise<{ taught: number; alreadyKnown: number; upgrad
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
-async function main() {
+async function main(): Promise<number> {
   log('=== refresh-monthly: monthly POI refresh ===\n');
+  const CATS = categoriesForRun(RUN_FLAG);
+  log(`Cadence: ${RUN_FLAG === '--light' ? 'light (--light)' : 'COMPLETE pass (the default)'} — ${CATS.length} categories`);
+  log(`Canonical queue: ${LINA_DB} (${RUNTIME_DB.rule})`);
+
+  // THE MAP, named and fingerprinted BEFORE anything else happens: "which map
+  // did this run touch" is answerable from the log alone, and the hash is the
+  // same one deploy_map.sh verifies on the receiving atom.
+  if (!fs.existsSync(POIS_DB)) {
+    log(`FATAL: no map at ${POIS_DB} (rule: ${MAP_DB.rule}).`);
+    log('  Refusing to create an empty map and scrape a month of budget into it.');
+    log('  Set SKOPJE_POIS_DB, or run from the repo; to build a fresh map: npm run map:build');
+    return 2;
+  }
+  const mapStat = fs.statSync(POIS_DB);
+  const mapSha = crypto.createHash('sha256').update(fs.readFileSync(POIS_DB)).digest('hex').slice(0, 12);
+  log(`Map: ${POIS_DB} (${MAP_DB.rule}) sha256:${mapSha} ${(mapStat.size / 1e6).toFixed(1)}MB`);
 
   const db = new Database(POIS_DB);
 
@@ -783,22 +875,32 @@ async function main() {
   // touched, no POI is written. This is the check that must be read before
   // any real pass (the drained-keys lesson).
   if (DRY_RUN) {
-    const { planCoverage, seedTileScansFromPois } = await import('../src/geo/tileCoverage');
-    const { categoriesForRun } = await import('../src/geo/serpCapture');
-    const cats = categoriesForRun(RUN_FLAG);
-    const seeded = seedTileScansFromPois(db, cats);
-    const plan = planCoverage(db, cats);
+    const seeded = seedTileScansFromPois(db, CATS);
+    const plan = planCoverage(db, CATS);
     log('=== DRY RUN (no keys touched) ===');
-    log(`  Cadence: ${RUN_FLAG ?? 'auto'} — ${cats.length} categories`);
-    log(`  Grid: ${plan.totalTiles} tiles × ${cats.length} categories = ${plan.totalPairs} pairs`);
+    log(`  Cadence: ${RUN_FLAG === '--light' ? 'light (--light)' : 'COMPLETE pass (the default)'} — ${CATS.length} categories`);
+    log(`  Grid: ${plan.totalTiles} tiles × ${CATS.length} categories = ${plan.totalPairs} pairs`);
     log(`  Already scanned: ${plan.scannedPairs} pairs (ledger seeded this run: ${seeded})`);
     log(`  Unscanned pairs (tiles touched: ${plan.uncoveredTiles}): ${plan.uncoveredPairs}`);
     log(`  ESTIMATED SEARCHES to finish the pass: ${plan.estimatedSearches}`);
     log(`  Keys loaded: ${SERPAPI_KEYS.length} (free plan = 250 each)`);
     if (SEARCH_LIMIT !== Infinity) log(`  --limit would cap this run at: ${SEARCH_LIMIT}`);
-    log(`  Budget floor per run: 20 searches (hard stop)`);
+    log(`  Budget floor per run: ${BUDGET_FLOOR} searches (hard stop)`);
+
+    // PRE-FLIGHT GATE — the pass must FIT the keys on disk. A dry run that
+    // reports more searches than the keys can buy describes a run that will
+    // stop half-finished and leave the grid open; fail here, in seconds,
+    // instead of discovering it 38 minutes and three keys later.
+    const ceiling = SERPAPI_KEYS.length * 250;
+    log(`  Budget ceiling (keys on disk × 250): ${ceiling}`);
+    if (SEARCH_LIMIT === Infinity && plan.estimatedSearches > ceiling) {
+      log(`  ✗ This pass needs ${plan.estimatedSearches} searches; the keys on disk can buy ${ceiling}.`);
+      log('    Re-key first, or size a partial pass explicitly with --limit=N.');
+      db.close();
+      return 1;
+    }
     db.close();
-    return;
+    return 0;
   }
 
   // Phase A: OSM restore. Skipped on a --rescan repair run: OSM rows have
@@ -822,7 +924,7 @@ async function main() {
     log(`  Google inserted: ${googleInserted}`);
     log(`  SerpApi remaining: ${serpApiLeft}`);
     db.close();
-    return;
+    return 0;
   }
 
   // Phase B2: Identity propagation
@@ -856,7 +958,24 @@ async function main() {
   log(`  Poison sweep downgraded: ${poisonDowngraded}`);
   log(`  SerpApi remaining: ${serpApiLeft}`);
 
+  // ── VERIFY — the exit code is the deliverable's verdict ────────────────────
+  console.log('');
+  log('=== VERIFY ===');
+  const v = verifyMapDb(db, CATS, { searchesLeft: serpApiLeft, budgetFloor: BUDGET_FLOOR });
   db.close();
+  for (const w of v.warnings) log(`  ⚠ ${w}`);
+
+  if (v.violations.length > 0) {
+    for (const bad of v.violations) log(`  ✗ ${bad}`);
+    log('=== RUN FAILED VERIFICATION — this map is NOT shippable ===');
+    return 1;
+  }
+  log(`  ✓ integrity ${v.integrity} · pois ${v.pois} · one row per place_id · `
+    + `coverage ${v.totalPairs - v.uncoveredPairs}/${v.totalPairs} pairs`);
+  log('=== RUN OK — the map is shippable ===');
+  return 0;
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main()
+  .then(code => process.exit(code))
+  .catch(e => { console.error(e); process.exit(1); });

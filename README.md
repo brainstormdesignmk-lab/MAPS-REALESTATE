@@ -18,7 +18,7 @@ src/compat/        Node-16 polyfill (fetch/undici) — atoms run Node 16
 src/data/          type-only shim (FeedLandmark) so src/geo needs zero rewrites
 scripts/           all network + cron jobs (the ONLY place network lives)
 data/              skopje-pois.db (offline map), address-overrides.json
-tests/             the geo test suite (121 tests)
+tests/             the geo test suite (`npm test`)
 GEO_VERSION.txt    md5 stamps of src/geo — assert after any geo change
 ```
 
@@ -31,7 +31,7 @@ so the second copy was deleted in 2026-10.
 
 1. **`src/geo` is the only copy of the geo engine in the cluster.** Every change
    to landmark/offline-map/queue code is made here, tested here (`npm test`,
-   121 tests), pushed to GitHub.
+   the whole suite), pushed to GitHub.
 2. **LINA never carries a copy.** Its `src/geo` is a machine-local symlink made
    by `inbound_final/scripts/link-geo.js` (`npm run link:geo`, also wired into
    `postinstall` and `deploy-atoms.sh`). LINA compiles the linked tree into its
@@ -57,13 +57,55 @@ so the second copy was deleted in 2026-10.
 | **LINA bots** (lenovo, atom01) | consume geo, never edit it | link to this repo's `src/geo` via `link-geo.js` |
 | **ATOM** (`192.168.1.11`, Node 16 i686) | LINA runtime | geo-watcher is optional here; T60 stays the hub |
 
-## Crons (install on the hub with `npm run cron:install`, T60 only)
+## NO MAP JOB IS SCHEDULED — and the owner sync always is
 
+**The map is a FIXED ARTIFACT.** It is finished and deployed by a human, and it
+stays exactly that until a human decides to run the SerpApi pass again. No timer
+may change the map, rebuild it, resolve a landmark, spend a search or enrich a
+reply.
+
+There used to be a monthly refresh and a daily healthcheck installed here (plus
+a nightly landmark resolver, a weekly map pull and an enrichment pass elsewhere).
+All of those are gone, and the installer is now the ENFORCER:
+
+```bash
+npm run cron:check     # exit 0 = COMPLIANT; exit 1 = a MAP job is scheduled
+npm run cron:remove    # strips every forbidden line (idempotent)
+npm run cron:install   # REFUSES, and prints the manual commands instead
 ```
-0 4 1 * *  monthly refresh — POI restore (Overpass, free) + SerpApi top-up
-           (budget ≤ 80/mo, STOP at 20 left) + queue drain + poison sweep
-0 5 * * *  daily healthcheck — read-only snapshot into logs/health.log
+
+**One job is required and must never be swept away:** `*/5 * * * * hermes-price.sh`
+on the bot atom. It is not map work — Lina asks owners for the current price and
+confirms the address with them before a visit, and that one job carries BOTH
+corrections (`price_changes`, `address_changes`) through the hub to the app. A
+no-cron sweep deleted it once (2026-10-14): every published price froze and every
+corrected address was stranded, so its absence is now its own failure:
+
+```bash
+npm run cron:check -- --require-sync   # on an atom: exit 1 if the owner sync is missing
 ```
+
+Run `cron:check` on every machine you have an account on — hub, workstation,
+each atom — and after any restore from an old image. The atom fleet is covered
+automatically by `npm run atoms:deploy` in the bot repo.
+
+The one non-job line, `@reboot … # LINA_ATOM`, is KEPT by default: it spends
+nothing, learns nothing and only brings the bot back after a power cut. Drop it
+with `npm run cron:remove -- --remove-reboot`.
+
+What used to be scheduled is now a command you run:
+
+```bash
+npm run refresh    # the map pass — spends SerpApi only because YOU asked
+npm run health     # read-only state snapshot
+npm run census     # street coverage
+```
+
+`refresh` is the same one command it always was — OSM restore + SerpApi top-up
+(COMPLETE pass; the ledger decides the spend) + queue harvest and drain + poison
+sweep, then **VERIFY**. The exit code is the verdict: `0` shippable ·
+`1` VERIFY failed · `2` no map at the resolved path. The full procedure lives in
+`docs/november-runbook.md`.
 
 `geo-watcher` runs wherever LINA runs that owns a fresh map (lenovo/atom):
 polls Supabase for `geo_source IS NULL` rows every 60s and resolves them
@@ -76,9 +118,10 @@ SerpApi per property. As a service: `npm run watch` (or cron `--once`).
   addresses), then fold `data/address-overrides.json` in. Fresh = ~4060 POIs.
 - `npm run map:google` — SerpApi Google Maps tiles → merged `pois` table rows
   (`source='google'`, place_id stored) — run from the hub, budget-guarded.
-- `npm run refresh` — monthly: OSM restore → Google top-up → queue drain
-  (bbox-validated google_cached upgrades) → poison sweep (downgrades stale
-  osm rows; `osm_low_confidence` never serves a landmark).
+- `npm run refresh` — monthly: OSM restore → Google top-up (complete pass;
+  ledger-gated) → queue harvest + drain (bbox- and trust-guard-validated
+  `google_cached` upgrades) → poison sweep → VERIFY. The exit code is the
+  verdict; see `docs/november-runbook.md`.
 - `npm run health` — read-only: POI counts by source, cache tiers, queue depth.
 - `npm run backup` / `backup:serve` / `backup:restore` — Supabase → local
   SQLite/images snapshot + HTTP serve (hub role).
@@ -88,7 +131,7 @@ SerpApi per property. As a service: `npm run watch` (or cron `--once`).
 ```bash
 git clone <github-maps-url> && cd maps-realestate
 npm ci                 # Node 16: better-sqlite3 8.7.0, tsx 3.13.0 pinned
-npm test               # 73 tests
+npm test               # the geo suite (exit 0 = green)
 npm run map:build      # fresh offline map
 npm run cron:check     # verify crons (install with --install on the hub)
 ```
@@ -103,3 +146,13 @@ do) — `SERPAPI_KEY`, `SUPABASE_*`, optional `DB_PATH`/`SKOPJE_POIS_DB`.
 - Cache writes are upgrade-only, keyed by `property.id`.
 - `osm_low_confidence` never serves a landmark name or coordinate link.
 - Type matching is case-insensitive + whitespace-normalized everywhere.
+- **Every path is absolute and repo-anchored.** The map (`resolveMapDb`), the
+  queue (`resolveRuntimeDb`) and the key files never resolve against
+  `process.cwd()` — a cron `cd`, an ssh'd shell or a symlinked cwd cannot make a
+  run read or write a different file than the operator expects.
+- **One queue.** `geo_reresolve_queue` has exactly one drained copy; every stray
+  sibling is merged into it before the drain, and a collected atom snapshot is
+  merged through an import ledger so re-collection never re-spends.
+- **A run's exit code means the invariants held.** VERIFY (`src/geo/runVerify.ts`)
+  enforces integrity, POI count, one row per `place_id`, and coverage closed (or
+  provably budget-bound). A silent under-run is a failed run.

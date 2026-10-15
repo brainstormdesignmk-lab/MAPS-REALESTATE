@@ -31,9 +31,10 @@
  *
  * Credentials: SUPABASE_URL / SUPABASE_ANON_KEY from ~/.lina/lina.env (falls
  * back to the live qkgio project defaults, same as refresh-monthly.ts).
- * DB paths: DB_PATH / SKOPJE_POIS_DB from env (defaults: data/lina.db,
- * data/skopje-pois.db). Runs on THIS machine (the box that owns the offline
- * map) — never on T60.
+ * DB paths: DB_PATH / SKOPJE_POIS_DB from env, resolved through
+ * src/geo/runtimeDb.ts — a RELATIVE path anchors to the repo, never to
+ * process.cwd() (defaults: <repo>/data/lina.db, <repo>/data/skopje-pois.db).
+ * Runs wherever LINA runs and a fresh map is reachable.
  */
 
 import '../src/compat/node16';
@@ -42,6 +43,7 @@ import * as dotenv from 'dotenv';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import { resolveRuntimeDb, resolveMapDb } from '../src/geo/runtimeDb';
 
 dotenv.config({ path: path.join(os.homedir(), '.lina', 'lina.env') });
 
@@ -49,8 +51,15 @@ const SUPABASE_URL = process.env.SUPABASE_URL ?? 'https://qkgioqotxjxffiaufgwd.s
 const SUPABASE_ANON_KEY = process.env.SUPABASE_ANON_KEY
   ?? 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFrZ2lvcW90eGp4ZmZpYXVmZ3dkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTUxMTU0NjUsImV4cCI6MjA3MDY5MTQ2NX0.WVno6c6_rvFqFwj1fN8UWHYmlit0C-6J_h57P8d5eOI';
 
-const LINA_DB = process.env.DB_PATH ?? path.join(process.cwd(), 'data', 'lina.db');
-const POIS_DB = process.env.SKOPJE_POIS_DB ?? path.join(process.cwd(), 'data', 'skopje-pois.db');
+// Same resolution the monthly refresh drains against (src/geo/runtimeDb.ts):
+// DB_PATH in ~/.lina/lina.env is RELATIVE, and resolving it against cwd made
+// this writer enqueue into a different file than Phase C drained from — that is
+// how geo_reresolve_queue fragmented. One absolute answer, repo-anchored.
+const LINA_DB = resolveRuntimeDb().file;
+// The MAP this watcher resolves against. Same cwd-independence as the queue:
+// `process.cwd()` made the watcher read one map while the monthly run wrote
+// another — the watcher would then confidently answer from a stale copy.
+const POIS_DB = resolveMapDb().file;
 
 const once = process.argv.includes('--once');
 const intervalArg = process.argv.find(a => a.startsWith('--interval='));
@@ -101,7 +110,7 @@ async function pollOnce(): Promise<number> {
   const { importPropertyGeo } = await import('../src/geo/importGeo');
 
   const db = new Db(LINA_DB);
-  let offlineMap: OfflineMapStore | null = null;
+  let offlineMap: InstanceType<typeof OfflineMapStore> | null = null;
   try {
     offlineMap = new OfflineMapStore(POIS_DB);
     if (!offlineMap.available) offlineMap = null;

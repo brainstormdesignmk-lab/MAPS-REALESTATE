@@ -1,3 +1,10 @@
+> **SUPERSEDED — and its cron instructions are VOID.** As of 2026-10-14 no MAP
+> job is scheduled anywhere in this cluster (see `docs/november-runbook.md` §10).
+> The ONE schedule that must stay installed is the atom's owner price sync
+> (`*/5 hermes-price.sh`) — it is not map work. Any step below that says "install
+> a cron line" / "run this monthly" is historical only; `npm run cron:check` must
+> report COMPLIANT on every machine (add `--require-sync` on an atom).
+
 # OCTOBER RUNBOOK — "Every street Google knows, in one go"
 
 **Goal:** after this run, every street we can *name* (feed history + local map + OSM)
@@ -230,6 +237,20 @@ Then on the T60: restart the bot, confirm in the log the map loaded, and ask it
 "kade tocno se naogja?" for EB 77 — the answer should name a nearby landmark
 with the map pin, straight from the new map, zero network.
 
-The two existing cron lines (`30 0 * * *` enrich, `17 3 * * *` hermes) need
-nothing — they operate on the transferred files and on Supabase, and the
-standing monthly loop (B3 + drain) keeps the street set closed from here on.
+There is **no cron** doing any of this. The old lines (`30 0 * * *` enrich,
+`17 3 * * *` landmarks) were removed on 2026-10-14 — enrichment, landmark
+resolution and the SerpApi pass are all run by hand, when you choose:
+
+```bash
+bash scripts/enrich-cron.sh            # bot repo, after review
+bash scripts/hermes-nightly.sh         # bot repo
+npm run refresh                        # here, if you ever want a new month
+```
+
+The one line that **stays** scheduled is the atom's owner price sync
+(`*/5 hermes-price.sh`, bot repo): Lina asks owners for the current price, and
+that job carries each correction to the app. It is not map work — a deploy
+re-installs it if it is missing.
+
+The transferred map is the fixed artifact: unchanged until a human runs the
+SerpApi pass again.

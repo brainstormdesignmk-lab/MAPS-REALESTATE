@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
-# cron-if-primary.sh — FAILOVER GUARD for the secondary hub (T620).
+# cron-if-primary.sh — RETIRED. Do not schedule this; nothing is scheduled.
 #
-# The cluster has TWO map hubs: PRIMARY = T60 (192.168.1.20), SECONDARY = T620
-# (192.168.1.101). Both run the same crons; the secondary runs its job ONLY
-# while the primary is unreachable. Result: whichever machine is alive does
-# the work — no double SerpApi spend, no double Overpass load, crons stay
-# fire-and-forget with zero coordination infrastructure.
+# NO CRONS (2026-10-14): this file exists ONLY to coordinate which machine's
+# crontab runs the monthly job — i.e. it is a scheduler for a scheduler. With
+# every schedule removed it has no job left to guard, and `cron-if-primary` is
+# one of the patterns install-cron.ts strips from any crontab it finds.
 #
-# Reachability = ICMP ping (1 packet, 2s timeout). Ping is used instead of ssh
-# so the guard needs NO ssh keys on the secondary: a dead primary must never
-# depend on credentials to be detected.
+# Kept (not deleted) so that an old note or an old crontab line finds an
+# explanation here instead of a missing file. The failover question it solved is
+# now answered by hand: you run the pass on the machine that owns the map.
 #
-# Usage (from crontab):
-#   0 4 1 * * /path/to/scripts/cron-if-primary.sh 192.168.1.20 \
-#       /path/to/repo /path/to/repo/.node/bin/npx tsx scripts/refresh-monthly.ts \
-#       >> /path/to/repo/logs/refresh.log 2>&1
+# If it were ever revived, the original contract was: PRIMARY = T60
+# (192.168.1.20), SECONDARY = T620 (192.168.1.101); the secondary ran its job
+# only while the primary was unreachable (ICMP ping, 1 packet, 2s timeout — no
+# ssh keys needed on the secondary), so exactly one machine did the work with no
+# double SerpApi spend. That is, it was a good solution to a problem the no-cron
+# decision deletes.
 set -u
 
 PRIMARY="${1:?usage: cron-if-primary.sh <primary-host> <workdir> <command...>}"

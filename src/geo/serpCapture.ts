@@ -25,20 +25,45 @@ export const FULL_CATEGORIES = [
 ] as const;
 
 /** Monthly light pass — 2 categories/tile (~72 searches/month on 36 tiles).
- *  The doc's budget math (P8): full pass quarterly, light monthly. */
+ *  Reachable ONLY by asking for it (`--light`); see categoriesForRun. */
 export const LIGHT_CATEGORIES = ['supermarket', 'pharmacy'] as const;
 
-/** true = quarterly full pass (Jan/Apr/Jul/Oct); false = monthly light. */
+/**
+ * DEPRECATED — no longer decides anything. Kept exported because it is part of
+ * the published geo surface; do not start using it again.
+ *
+ * It used to gate the cadence: "full pass only in Jan/Apr/Jul/Oct". That made
+ * COMPLETENESS depend on the calendar AND on an operator remembering `--full`.
+ * Measured for real:
+ *   month 10/2026 auto → 15 categories   (October = a full quarter month)
+ *   month 11/2026 auto →  2 categories   (supermarket, pharmacy)
+ *   month 12/2026 auto →  2 categories
+ * A plain November run therefore considered 135 × 2 = 270 pairs, worked on 66
+ * of the 510 open gaps, left 444 open — and printed a successful summary. That
+ * is the silent-under-run failure mode this function used to cause.
+ */
 export function isFullPassMonth(d = new Date()): boolean {
   return d.getUTCMonth() % 3 === 0;
 }
 
-/** Categories for this run. CLI flags win (--full / --light) so a manual
- *  October run can force either; otherwise the calendar decides. */
-export function categoriesForRun(cliFlag?: '--full' | '--light', d = new Date()): readonly string[] {
+/**
+ * Categories for this run. THE COMPLETE PASS IS THE DEFAULT — the calendar no
+ * longer gates anything, and correctness no longer depends on a flag a human
+ * has to remember at 4 a.m.
+ *
+ * Why defaulting to full is safe and cheap: Phase B is LEDGER-DRIVEN. A pair
+ * already in `tile_scans` is never searched again, so a "full" pass in a
+ * non-quarter month does not re-spend — it only visits the gaps a light pass
+ * would skip. The 15 categories are the thing being kept complete; the ledger
+ * is what decides what actually costs money.
+ *
+ * `--light` stays available as an explicit, deliberate cheap month.
+ * The `d` parameter is accepted-but-ignored so existing call sites keep
+ * type-checking.
+ */
+export function categoriesForRun(cliFlag?: '--full' | '--light', _d = new Date()): readonly string[] {
   if (cliFlag === '--light') return LIGHT_CATEGORIES;
-  if (cliFlag === '--full') return FULL_CATEGORIES;
-  return isFullPassMonth(d) ? FULL_CATEGORIES : LIGHT_CATEGORIES;
+  return FULL_CATEGORIES;
 }
 
 /** The Skopje map bounds — the same bbox the Phase A Overpass queries use

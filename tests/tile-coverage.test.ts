@@ -3,6 +3,12 @@
 // must (1) count the true grid size, (2) skip already-scanned pairs, (3) be
 // seedable from existing Google POIs so a resumed run scans only the gaps,
 // and (4) estimate the spend BEFORE a single key is touched.
+//
+// (5) THE CADENCE GATE. The calendar used to decide which categories ran:
+// full only in Jan/Apr/Jul/Oct, otherwise 2. November therefore considered 270
+// of 2025 pairs, worked 66 of the 510 open gaps, left 444 open — and printed a
+// successful summary. Completeness must never depend on the month or on an
+// operator remembering a flag.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
@@ -10,12 +16,29 @@ import {
   buildTiles, tileFor, tileKey,
   seedTileScansFromPois, planCoverage, uncoveredPairs, recordScan, loadTileScans,
 } from '../src/geo/tileCoverage';
+import { categoriesForRun, FULL_CATEGORIES, LIGHT_CATEGORIES, isFullPassMonth } from '../src/geo/serpCapture';
 
 function freshDb(): Database.Database {
   const db = new Database(':memory:');
   db.exec(`CREATE TABLE pois (name TEXT, type TEXT, lat REAL, lon REAL, source TEXT)`);
   return db;
 }
+
+test('categoriesForRun: the COMPLETE pass is the default in EVERY month', () => {
+  for (const month of [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]) {
+    const d = new Date(Date.UTC(2026, month, 1));
+    assert.equal(categoriesForRun(undefined, d).length, FULL_CATEGORIES.length,
+      `month ${month + 1} must plan a complete pass`);
+    assert.equal(categoriesForRun('--full', d).length, FULL_CATEGORIES.length);
+  }
+  // November 2026 — the month the calendar gate would have halved the run.
+  assert.equal(categoriesForRun(undefined, new Date(Date.UTC(2026, 10, 1))).length, 15);
+  // A deliberately cheap month is still reachable, but only by asking.
+  assert.deepEqual([...categoriesForRun('--light')], [...LIGHT_CATEGORIES]);
+  // isFullPassMonth survives only as the deprecated predicate it always was.
+  assert.equal(isFullPassMonth(new Date(Date.UTC(2026, 9, 1))), true);
+  assert.equal(isFullPassMonth(new Date(Date.UTC(2026, 10, 1))), false);
+});
 
 test('buildTiles produces the 9×15 = 135-tile grid over urban Skopje', () => {
   const tiles = buildTiles();
