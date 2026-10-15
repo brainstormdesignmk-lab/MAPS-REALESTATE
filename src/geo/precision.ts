@@ -104,6 +104,38 @@ export function coordsFromMapsUrl(url: string | undefined | null): { lat: number
   return { lat, lon };
 }
 
+/** Is this a Google Maps link the agency may put in front of a client?
+ *
+ *  BANNED: the NAME-SEARCH forms — `…/maps/search/?api=1&query=<name>`, and
+ *  the `?api=1&query=` / `?query=` relatives — and every non-Google shortener
+ *  (tinyurl: the agency refuses third-party links). A percent-encoded Cyrillic
+ *  name makes the link long enough for the console to cut mid-encoding, and a
+ *  cut search link opens a results LIST at country zoom (production: a "crna
+ *  gora" name search opened a Montenegro-wide list; a cut `?q=41.99560,`
+ *  opened "Google Maps can't find 41.99560").
+ *
+ *  ALLOWED: the coordinate pin (`?q=lat,lon`), the @-view, the `?cid=` place
+ *  card, and a stored canonical `/maps/place/…` URL — what the capture script
+ *  records. `?q=` is accepted ONLY as coordinates: a NAME there is a search.
+ *  This is the single judge for stored/curated links (the feed reader and
+ *  landmarkLink both call it), so a dirty row can never be served verbatim. */
+export function allowedLandmarkUrl(url: string | undefined | null): string | undefined {
+  const u = String(url ?? '').trim();
+  if (!u) return undefined;
+  if (!/^https?:\/\/(?:www\.)?(?:google\.com|maps\.google\.com|google\.mk)\//i.test(u)) return undefined;
+  if (/\/maps\/search\b/i.test(u)) return undefined;      // the banned form itself
+  if (/[?&]query=/i.test(u)) return undefined;            // name/coordinate query
+  if (/[?&]api=1(?:&|$)/i.test(u)) return undefined;      // the Maps URL-API params
+  const q = u.match(/[?&]q=([^&]*)/i);
+  if (q) {
+    // ?q= is the coordinate pin — ONLY when it really is a coordinate pair.
+    let v = q[1];
+    try { v = decodeURIComponent(v); } catch { /* keep raw */ }
+    if (!/^-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?$/.test(v.trim())) return undefined;
+  }
+  return u;
+}
+
 // Landmark link — priority order (revised 2026-10-13, the [23:50] capture):
 //   1. A stored google.com/maps URL (canonical place_url from the capture
 //      script) — emitted verbatim, original Google.
@@ -129,9 +161,8 @@ export function landmarkLink(name: string, placeId: string | null, lat: number, 
   // BEST: a stored ORIGINAL Google URL (canonical place URL captured by
   // scripts/capture-place-urls.ts). Only google.com/maps links are accepted —
   // tinyurl/other shorteners are never emitted.
-  if (placeUrl && /^https?:\/\/(www\.)?(google\.com|maps\.google\.com|google\.mk)\//.test(placeUrl)) {
-    return placeUrl;
-  }
+  const curated = allowedLandmarkUrl(placeUrl);
+  if (curated) return curated;
   // 1. Coordinate pin — deterministic, unambiguous, and the only form that
   //    puts a MARKER on the map (the [23:50] decision: card-but-no-pin loses
   //    to a pin that shows where the landmark is).
