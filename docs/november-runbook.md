@@ -12,7 +12,7 @@ the old wording sent the operator to the wrong machine:
 
 | machine | what its map is |
 |---|---|
-| **workstation** (`~/Documents/maps-realestate`) | **the authority** — 5,991 POIs, sha256 `09069dbc3899…` after the 2026-10-15 repair (§11) |
+| **workstation** (`~/Documents/maps-realestate`) | **the authority** — 5,991 POIs, sha256 `33baa10ce8f0…` after the 2026-10-15 repairs (§11) |
 | **atom01** | the bot's map: `SKOPJE_POIS_DB=/home/atom/Documents/PROJECTS/maps-realestate/data/skopje-pois.db`. It is a **copy**; it only changes when you ship one |
 | **T60** | **not the map hub.** It has no `/srv` at all, its `SKOPJE_POIS_DB` is empty, and its two copies are stale (`inbound_final/data` = 2026-10-08 sha `148b42f8460b…`; `maps-realestate/data` = 2026-09-05, **1 MB**, sha `4b9cddf284a5…`) |
 
@@ -117,7 +117,7 @@ you are about to change, then the plan:
 ```
 Cadence: COMPLETE pass (the default) — 15 categories
 Canonical queue: …/data/lina.db (repo-anchored)
-Map: …/data/skopje-pois.db (absolute) sha256:09069dbc3899 3.9MB
+Map: …/data/skopje-pois.db (absolute) sha256:33baa10ce8f0 3.9MB
   Cadence: COMPLETE pass (the default) — 15 categories
   Unscanned pairs (tiles touched: 36): 510
   ESTIMATED SEARCHES to finish the pass: 510
@@ -361,14 +361,20 @@ Ship **after** §6 passes, and never copy SQLite hot.
 sqlite3 data/skopje-pois.db ".backup '/tmp/skopje-pois.db.november'"
 
 # 2. Ship with checksum verification (refuses a broken map).
-#    <remote-dir> = the directory the BOT READS, i.e. the maps checkout — NOT
-#    inbound_final. Verified 2026-10-15 on atom01:
+#    <remote-dir> = the PROJECT dir that CONTAINS data/ — NOT the data dir
+#    itself, and NOT inbound_final. Verified 2026-10-15 on atom01:
 #      $ grep '^SKOPJE_POIS_DB' /home/atom/.lina/lina.env
 #      SKOPJE_POIS_DB=/home/atom/Documents/PROJECTS/maps-realestate/data/skopje-pois.db
-#    Shipping to the bot's inbound_final/data puts the map where nothing reads
-#    it; the old `ls -d ~/*/secretaries/inbound_final` probe finds nothing on
-#    atom01 (its layout is PROJECTS/LINA + PROJECTS/maps-realestate).
-scripts/deploy_map.sh --key ~/.ssh/id_ed25519_atom01 atom01 /home/atom/Documents/PROJECTS/maps-realestate/data
+#    ⚠ The script appends `data/` itself. Passing the data dir makes it extract
+#      to .../data/data/ and then verify the checksum against THAT file — so the
+#      deploy prints ✅ checksum match while the map the bot reads is untouched.
+#      That happened here on 2026-10-15. After the deploy ALWAYS confirm the
+#      sha of the real file, not just the script's ✅:
+#        ssh atom01 'sha256sum .../maps-realestate/data/skopje-pois.db | cut -c1-16'
+#      Shipping to the bot's inbound_final/data puts the map where nothing reads
+#      it; the old `ls -d ~/*/secretaries/inbound_final` probe finds nothing on
+#      atom01 (its layout is PROJECTS/LINA + PROJECTS/maps-realestate).
+scripts/deploy_map.sh --key ~/.ssh/id_ed25519_atom01 atom01 /home/atom/Documents/PROJECTS/maps-realestate
 
 # 3. Confirm the atom is serving THE map you just verified: the sha256 prefix
 #    deploy_map.sh prints must equal the `sha256:` prefix the run logged in §5.
@@ -577,10 +583,11 @@ the diagnostic that should have caught this cannot see it.
 
 > **The artifact changed on 2026-10-15:** one row restored (§11.A), so §1's
 > measured table (5,990 POIs, sha `7f8554e9c670`) is the **2026-10-14** reading.
-> Today's live map is **5,991 POIs, sha `09069dbc3899…`**, and `data/skopje-pois.db.pre-embassy-fix`
-> is the rollback anchor for that one change.
+> Today's live map is **5,991 POIs, sha `33baa10ce8f0…`** (the rescan in §11.B wrote
+> the embassy's capture fields after the identity restore), and
+> `data/skopje-pois.db.pre-embassy-fix` is the rollback anchor for that one change.
 
-### A. The embassy place card — DONE on the workstation, NOT YET SHIPPED
+### A. The embassy place card — DONE and SHIPPED (2026-10-15)
 
 **What happened.** The Google anchor `Embassy of Montenegro`
 (`place_id 0x1354144841501047:0x71a2f884c5dc3050`, cid `8188380321651896400`)
@@ -596,9 +603,12 @@ Proved on a copy, then applied. Verified after: `nearestPois` near
 `?cid=8188380321651896400`; `integrity_check ok`; duplicate `place_id` **0**;
 POIs 5,990 → 5,991.
 
-**What is left is shipping it** — nothing on the atom changes until §8 runs.
-Note the atom (sha `7f8554e9c670…`) is now *older* than the workstation
-(`09069dbc3899…`). Ship once, **after** the November pass, and check the sha.
+**Shipped 2026-10-15** with §8: atom01 went `7f8554e9c670…` → **`33baa10ce8f0…`**
+(its previous DB backed up to `data/skopje-pois.db.bak-20261015-115540`), the bot
+was restarted so it reopened the map, `health=200`, and the atom's own DB now
+reports the anchor with `review_count 7 / rating 4.1` and `integrity ok`.
+The first attempt of that deploy **looked** successful and shipped nothing — see
+the ⚠ in §8. Re-ship after the November pass as usual.
 
 ### B. Re-scan that pair to get the embassy's reviews/rating back (1 search)
 
