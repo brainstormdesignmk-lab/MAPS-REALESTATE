@@ -44,6 +44,7 @@ import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../
 import { categoriesForRun } from '../src/geo/serpCapture';
 import { planCoverage, seedTileScansFromPois } from '../src/geo/tileCoverage';
 import { verifyMapDb } from '../src/geo/runVerify';
+import { decideSpendGate } from '../src/geo/spendGate';
 import { identityHeal } from './identity-heal';
 import { stripBlindFusions } from './strip-blind-fusions';
 import {
@@ -885,17 +886,24 @@ async function main(): Promise<number> {
     log(`  ESTIMATED SEARCHES to finish the pass: ${plan.estimatedSearches}`);
     log(`  Keys loaded: ${SERPAPI_KEYS.length} (free plan = 250 each)`);
     if (SEARCH_LIMIT !== Infinity) log(`  --limit would cap this run at: ${SEARCH_LIMIT}`);
-    log(`  Budget floor per run: ${BUDGET_FLOOR} searches (hard stop)`);
 
-    // PRE-FLIGHT GATE — the pass must FIT the keys on disk. A dry run that
-    // reports more searches than the keys can buy describes a run that will
-    // stop half-finished and leave the grid open; fail here, in seconds,
-    // instead of discovering it 38 minutes and three keys later.
-    const ceiling = SERPAPI_KEYS.length * 250;
-    log(`  Budget ceiling (keys on disk × 250): ${ceiling}`);
-    if (SEARCH_LIMIT === Infinity && plan.estimatedSearches > ceiling) {
-      log(`  ✗ This pass needs ${plan.estimatedSearches} searches; the keys on disk can buy ${ceiling}.`);
-      log('    Re-key first, or size a partial pass explicitly with --limit=N.');
+    // PRE-FLIGHT GATE — the pass must FIT THE ACCOUNT, not a nominal hope.
+    // The gate used to compare against keys × 250; on 2026-10-15 that printed
+    // "2000" while 13 searches remained, exited 0, and the real run then exited
+    // 0 with 510 of 2,025 pairs open. /account is FREE, so the gate now reads
+    // the truth. A probe failure falls back to the nominal ceiling and SAYS SO.
+    const liveRemaining = await refreshBudget();
+    const probeOk = keyLeft.some(v => v >= 0);
+    const verdict = decideSpendGate({
+      estimatedSearches: plan.estimatedSearches,
+      liveRemaining,
+      probeOk,
+      keysOnDisk: SERPAPI_KEYS.length,
+      budgetFloor: BUDGET_FLOOR,
+      limit: SEARCH_LIMIT === Infinity ? undefined : SEARCH_LIMIT,
+    });
+    for (const line of verdict.lines) log(line);
+    if (!verdict.go) {
       db.close();
       return 1;
     }
