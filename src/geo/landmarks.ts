@@ -325,6 +325,26 @@ export interface DetailsLandmark {
   place_url?: string;
 }
 
+/** A sentence end inside a captured span. The description names the anchor and
+ *  then keeps talking about the FLAT — "...во близина на Сити Мол. Купатилото
+ *  и Кујната се комплет изреновирани..." — and the capture class (letters,
+ *  spaces, periods) swallowed the next sentence, so the rotation served
+ *  "Сити Мол. Купатилото" as a landmark NAME (EB 48; the same shape on EB 63
+ *  "Црногорска Амбасада. Поседува Посебна Спа" and EB 79 "главниот влез на
+ *  Клинички Центар. Станот"). Prose is not a place. Cut at the first sentence
+ *  end; an ABBREVIATION ("ул.", "бул.", "бр.") is not one, so its token is
+ *  exempt — the street guard below then rejects the name as usual. */
+const ABBREV_BEFORE_DOT_RE = /(?:^|\s)(?:ул|бул|бр|кв|с|стр|мк|г|д|т)\.$/iu;
+function cutAtSentenceEnd(blob: string): string {
+  for (let i = 1; i < blob.length; i++) {
+    if (blob[i - 1] !== '.') continue;
+    if (!/\s/.test(blob[i] ?? '')) continue;                    // "Мол.Купатилото" — no sentence gap
+    if (ABBREV_BEFORE_DOT_RE.test(blob.slice(0, i))) continue;  // "ул." is not an ending
+    return blob.slice(0, i - 1).trim();
+  }
+  return blob;
+}
+
 export function extractDetailsLandmark(
   details: string | undefined,
   center?: Center,
@@ -357,6 +377,9 @@ export function extractDetailsLandmarks(
   for (const m of details.matchAll(CHAIN_RE)) {
     if (out.length >= max) break;
     let blob = m[1].trim().replace(/[.,]$/, '');
+    // SENTENCE BOUNDARY: the anchor is a PLACE, the rest of the span is the
+    // ad's prose (see cutAtSentenceEnd).
+    blob = cutAtSentenceEnd(blob);
     // Strip trailing junk: quotes, parens
     blob = blob.replace(/[{}`\[\]()"„‟«»'']+$/g, '').trim();
     // Remove leading articles: "на" etc.

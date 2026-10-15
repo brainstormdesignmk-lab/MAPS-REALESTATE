@@ -52,6 +52,32 @@ describe('extractDetailsLandmark', () => {
     assert.equal(result!.lon, null, 'lon must be null when POI not in table');
   });
 
+  // ── THE PROSE DEFECT (the fix list's purge, durable half) ────────────────
+  // The capture class swallowed the sentence AFTER the anchor, so the cache
+  // held landmarks like "Сити Мол. Купатилото и Кујната се комплет" — real
+  // production rows for EB 48, 63 and 79. The reported names come from the
+  // agents' own descriptions verbatim; the landmark must stop at the place.
+  const PROSE_OPIS: Array<[number, string, string]> = [
+    [48, 'Се издава трособен стан во Карпош 3 во близина на Сити Мол. Купатилото и Кујната се комплет изреновирани, Малку постар намештај.Идеално за студенти 4 кат без лифт.', 'Сити Мол'],
+    [63, 'Се Продава Гарсоњера во Сутерен на Зграда. Гарсоњерата е комплетно реновирана и е на Одлична Локација , во близина на Црногорска Амбасада. Поседува Посебна Спална Соба која не е во имотен лист.', 'Црногорска Амбасада'],
+    [79, 'Издава стан во Центар, на почеток на Водно, спроти главниот влез на Клинички Центар. Станот има дневна, спална, кујна и бања со тоалет.', 'главниот влез на Клинички Центар'],
+  ];
+
+  for (const [eb, opis, expected] of PROSE_OPIS) {
+    it(`EB ${eb}: the extracted name stops at the sentence end (never the ad's prose)`, () => {
+      const result = extractDetailsLandmark(opis, center, offlineMap);
+      assert.ok(result, `EB ${eb} must still yield a landmark`);
+      assert.equal(result!.name, expected);
+      assert.ok(!/\./.test(result!.name), `no sentence punctuation in a landmark name: ${result!.name}`);
+    });
+  }
+
+  it('an abbreviation is not a sentence end — "с. Влае" survives whole, the prose after it does not', () => {
+    const result = extractDetailsLandmark('Издава се стан во близина на с. Влае. Станот има две спални соби.', center, offlineMap);
+    assert.ok(result, 'should extract the anchor');
+    assert.equal(result!.name, 'с. Влае', 'the abbreviation dot must not cut the name in half');
+  });
+
   it('handler must never emit a coordinate link for a null-coords landmark', () => {
     // Simulate what the handler does: check lat/lon before building link
     const result = extractDetailsLandmark(
