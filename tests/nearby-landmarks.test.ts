@@ -88,6 +88,68 @@ describe('nearbyLandmarks', () => {
     map.close();
   });
 
+  // ── FIX LIST, ITEM 3 ────────────────────────────────────────────────────
+  // The FEED's own ranked landmark list is the rotation whenever the property
+  // has one (that is the list the agency page shows). The offline-map scan is
+  // the FALLBACK, for a property the feed has not placed yet.
+
+  it('item 3: a property with a feed roster rotates ON the roster — feed order, no map padding', () => {
+    const svc = new LandmarkService(db, { osm: false, offlineMap });
+    // The map's own nearest-first order around (42.0, 21.43) is
+    // Рамстор Мол → Ван Гог → Градежен факултет. The roster says otherwise
+    // and the roster wins.
+    const result = svc.nearbyLandmarks({
+      id: 21, eb: 210, address: 'Тест 1', location: 'Центар',
+      lat: 42.0, lon: 21.43, geo_source: 'stored',
+      landmarks: [
+        { landmark: 'Градежен факултет', type: 'university', distance_m: 410, maps_url: 'https://maps.google.com/?cid=123' },
+        { landmark: 'Рамстор Мол', type: 'mall', distance_m: 430 },
+      ],
+    });
+    assert.deepEqual(result.map(r => r.landmark), ['Градежен факултет', 'Рамстор Мол'],
+      'the rotation must be the feed list in feed order — never re-ranked or padded from the map');
+    for (const r of result) {
+      assert.ok(Number.isFinite(r.lat) && Number.isFinite(r.lon), `every roster slot must be pinnable: ${r.landmark}`);
+    }
+  });
+
+  it('item 3: a roster entry whose own link pins a point keeps THAT point — even for a place the map does not know', () => {
+    const svc = new LandmarkService(db, { osm: false, offlineMap });
+    const result = svc.nearbyLandmarks({
+      id: 22, eb: 220, address: 'Тест 1', location: 'Центар',
+      lat: 42.0, lon: 21.43, geo_source: 'stored',
+      landmarks: [{ landmark: 'Некој Нов Локал', type: 'place', distance_m: 250,
+        maps_url: 'https://maps.google.com/?q=42.00100,21.43999' }],
+    });
+    assert.equal(result.length, 1);
+    assert.equal(result[0].landmark, 'Некој Нов Локал');
+    assert.equal(result[0].lat, 42.001, 'the curated pin is the point — not a looked-up one');
+    assert.equal(result[0].lon, 21.43999);
+  });
+
+  it('item 3: a STALE roster entry (no pin, unknown to the map) is dropped, never served as an unpinnable claim', () => {
+    const svc = new LandmarkService(db, { osm: false, offlineMap });
+    const result = svc.nearbyLandmarks({
+      id: 23, eb: 230, address: 'Тест 1', location: 'Центар',
+      lat: 42.0, lon: 21.43, geo_source: 'stored',
+      landmarks: [
+        { landmark: 'Избришан Пои', type: 'place', distance_m: 120, maps_url: 'https://maps.google.com/?cid=9' },
+        { landmark: 'Рамстор Мол', type: 'mall', distance_m: 430 },
+      ],
+    });
+    assert.deepEqual(result.map(r => r.landmark), ['Рамстор Мол'],
+      'a roster entry with no point we can verify is not a landmark the chat may claim');
+  });
+
+  it('item 3: a property with NO roster still rotates on the map scan (the fallback)', () => {
+    const svc = new LandmarkService(db, { osm: false, offlineMap });
+    const result = svc.nearbyLandmarks({
+      id: 24, eb: 240, address: 'Тест 1', location: 'Центар',
+      lat: 42.0, lon: 21.43, geo_source: 'stored',
+    });
+    assert.ok(result.length > 0, 'the map scan must still serve a roster-less property');
+  });
+
   it('trusted center + empty POI table → pois empty + queue row no_landmark', () => {
     // Empty map — no POIs at all
     const emptyDbPath = tmpDb();
