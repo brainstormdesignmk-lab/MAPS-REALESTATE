@@ -28,12 +28,14 @@
 
 import { Db } from '../store/db';
 import { OfflineMapStore } from './offlineMap';
-import { centerTrusted } from './landmarks';
+import { centerTrusted, FEED_LANDMARK_MAX_M } from './landmarks';
 import { distM } from './precision';
 
 /** A cached landmark farther than this from the trusted center is poison —
- *  the same 500m cap the client-facing "близина" claims are held to. */
-export const POISON_MAX_DIST_M = 500;
+ *  the same 200m cap the client-facing "близина" claims are held to. A cached
+ *  300m row is no longer usable by any answer lane, so it is downgraded here
+ *  rather than lingering as a cache entry nobody may serve. */
+export const POISON_MAX_DIST_M = FEED_LANDMARK_MAX_M;
 
 /** Property row as the sweep sees it (Supabase REST in the real cron). */
 export interface SweepProperty {
@@ -58,7 +60,7 @@ export interface SweepResult {
   checked: number;
   /** Rows downgraded to osm_low_confidence (stale landmark / stale center). */
   downgraded: number;
-  /** Rows whose landmark survived the re-check (measured ≤ 500m, or POI not
+  /** Rows whose landmark survived the re-check (measured ≤ the 200m cap, or POI not
    *  findable → benefit of the doubt). */
   verified: number;
   /** Cache rows deleted — the property no longer exists upstream. */
@@ -97,7 +99,7 @@ export async function sweepPoison(deps: SweepDeps): Promise<SweepResult> {
     }
 
     // Failure = stale CENTER (claim "verified against a real center" is stale)
-    // or stale LANDMARK (measured farther than the 500m client-claim cap).
+    // or stale LANDMARK (measured farther than the 200m client-claim cap).
     let failed = false;
     const trusted = centerTrusted(prop.geo_source) && !!prop.lat && !!prop.lon;
     if (!trusted) {

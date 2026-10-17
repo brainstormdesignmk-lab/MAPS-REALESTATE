@@ -65,21 +65,22 @@ test('name variants are NOT deduped (Kipper vs Kipper Market - Butel = different
   store.close();
 });
 
-test('nearest POIs are capped at the limit and distance-ranked', () => {
+test('nearest POIs are capped at the limit and significance-ranked', () => {
   const dbPath = tmpDb();
   writeMap(dbPath, [
     { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },           // ~50m, rank 1
     { name: 'Рамстор Мол', type: 'mall', lat: 41.9987, lon: 21.4308 },         // ~200m, rank 5
-    { name: 'Парк Градски', type: 'park', lat: 41.9982, lon: 21.4310 },        // ~150m, rank 2
+    { name: 'Парк Градски', type: 'park', lat: 41.9982, lon: 21.4310 },        // ~150m, rank 4
     { name: 'Аптека 24', type: 'pharmacy', lat: 41.9980, lon: 21.4305 },       // ~130m, rank 3
   ], []);
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.9966, 21.4302, 500, 3);
   assert.equal(pois.length, 3, 'capped at limit=3');
-  // Distance drives the list: 47m cafe, 130m pharmacy, then 150m park.
-  assert.equal(pois[0].name, 'Кафе Миро');
-  assert.equal(pois[1].name, 'Аптека 24');
-  assert.equal(pois[2].name, 'Парк Градски');
+  // Significance drives the list (mall → park → pharmacy); the 47m cafe ranks
+  // below all three because a cafe is not a navigation anchor.
+  assert.equal(pois[0].name, 'Рамстор Мол');
+  assert.equal(pois[1].name, 'Парк Градски');
+  assert.equal(pois[2].name, 'Аптека 24');
   store.close();
 });
 test('same place_id merges ACROSS names and distances (embassy alias regression)', () => {

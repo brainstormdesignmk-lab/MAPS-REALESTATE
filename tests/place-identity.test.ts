@@ -72,6 +72,14 @@ test('containment (subset) needs an identified site + a local-script twin', () =
     'the residence is a different building');
   assert.equal(
     samePlaceName('Амбасада на Турција', 'Consular Section of the Embassy of the Czech Republic', 30, false, true).same, false);
+  // A BRANCH NUMBER is not a spelling variant: the Vero Center mall and the
+  // Vero supermarket 14m inside it are two businesses in one building, and the
+  // audit caught them taking two rotation slots.
+  assert.equal(
+    samePlaceName('Веро Центар', 'Веро 9', 14, false, true).same, false,
+    'a lone branch number added to a brand is a different shop');
+  assert.equal(
+    samePlaceName('Бит Пазар', 'Бит Пазар 1', 20, false, true).same, false);
 });
 
 test('embassy uniqueness accepts one plausible same-country candidate', () => {

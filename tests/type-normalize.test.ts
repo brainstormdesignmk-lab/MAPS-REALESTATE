@@ -65,31 +65,47 @@ test('a NAMED residential complex survives the junk filter (Beverly Hills class)
   store.close();
 });
 
-test('nearest eligible place wins: a place at 50m outranks a mall at 200m', () => {
+test('significance first: a mall inside the ring outranks a closer cafe', () => {
   const dbPath = tmpDb();
-  // Distance leads throughout the eligible pool, not only inside a special band.
+  // THE POLICY (2026-10-17, the [13:20] capture): a client navigates by the
+  // recognizable place — "кај Рамстор" / "кај Католичка" — not by the cafe that
+  // merely happens to be nearer. Inside the honesty ring significance decides.
   writeMap(dbPath, [
-    { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },   // ~50m
-    { name: 'Рамстор Мол', type: 'mall', lat: 41.9987, lon: 21.4308 }, // ~200m
+    { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },   // ~47m
+    { name: 'ТЦ Мавровка', type: 'mall', lat: 41.9966, lon: 21.4311 }, // ~66m
   ], []);
   const store = new OfflineMapStore(dbPath);
-  const pois = store.nearestPois(41.9966, 21.4302, 500, 10);
+  const pois = store.nearestPois(41.9966, 21.4302, 200, 10);
   assert.ok(pois.length >= 2, `expected both POIs, got ${pois.length}`);
-  assert.equal(pois[0].name, 'Кафе Миро', 'a 47m place must outrank a 238m mall');
-  assert.equal(pois[1].name, 'Рамстор Мол');
+  assert.equal(pois[0].name, 'ТЦ Мавровка', 'a 66m mall must outrank a 47m cafe');
+  assert.equal(pois[1].name, 'Кафе Миро');
   store.close();
 });
 
-test('nearest eligible place wins outside the former near band', () => {
+test('a church outranks a closer pharmacy — the [13:20] Catholic-church case', () => {
   const dbPath = tmpDb();
   writeMap(dbPath, [
-    { name: 'Кафе Далеку', type: 'cafe', lat: 41.99800, lon: 21.4302 }, // ~111m
-    { name: 'Рамстор Мол', type: 'mall', lat: 41.99870, lon: 21.4308 }, // ~196m
+    { name: 'Аптека Линцура', type: 'pharmacy', lat: 41.99700, lon: 21.43050 }, // ~50m
+    { name: 'Католичка црква Свети Јосиф', type: 'church', lat: 41.99800, lon: 21.43090 }, // ~170m
   ], []);
   const store = new OfflineMapStore(dbPath);
-  const pois = store.nearestPois(41.99700, 21.4302, 500, 10);
-  assert.equal(pois[0].name, 'Кафе Далеку', 'the nearer eligible public place leads');
-  assert.equal(pois[1].name, 'Рамстор Мол');
+  const pois = store.nearestPois(41.99660, 21.43020, 200, 10);
+  assert.equal(pois[0].name, 'Католичка црква Свети Јосиф',
+    `the church must be the anchor, got ${pois.map(p => p.name).join(', ')}`);
+  assert.equal(pois[1].name, 'Аптека Линцура');
+  store.close();
+});
+
+test('significance never reaches outside the ring', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Амбасада на Црна Гора', type: 'embassy', lat: 41.99930, lon: 21.43020 }, // ~300m
+    { name: 'Кафе Миро', type: 'cafe', lat: 41.99680, lon: 21.43020 },                 // ~22m
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99660, 21.43020, 200, 10);
+  assert.deepEqual(pois.map(p => p.name), ['Кафе Миро'],
+    'a 300m embassy is a distance answer, never a "во близина" candidate');
   store.close();
 });
 
@@ -106,18 +122,21 @@ test('EB 76 regression: a 76m embassy beats a popular 274m mall', () => {
   store.close();
 });
 
-test('popularity breaks only close-distance ties', () => {
+test('popularity breaks equal-significance, equal-distance ties', () => {
   const dbPath = tmpDb();
+  // Two malls at the same distance: the better-known one leads. Distance is
+  // still the tie-breaker before renown — the 100m mall precedes both.
   writeMap(dbPath, [
-    { name: 'Помалку познато место', type: 'embassy', lat: 41.99600, lon: 21.43142, review_count: 7 }, // ~100m
-    { name: 'Популарен мол', type: 'mall', lat: 41.99600, lon: 21.43191, review_count: 1500 }, // ~140m
+    { name: 'Популарен мол', type: 'mall', lat: 41.99600, lon: 21.43191, review_count: 1500 },     // ~140m
+    { name: 'Помалку познат мол', type: 'mall', lat: 41.99600, lon: 21.43051, review_count: 7 },   // ~23m
     { name: 'Најпопуларно подалеку', type: 'mall', lat: 41.99600, lon: 21.43312, review_count: 50000 }, // ~240m
+    { name: 'Рамстор Мол', type: 'mall', lat: 41.99600, lon: 21.43051, review_count: 1500 },      // same spot as the small mall
   ], []);
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.99600, 21.43020, 500, 10);
-  assert.equal(pois[0].name, 'Популарен мол', '40m close tie may favor the better-known place');
-  assert.equal(pois[1].name, 'Помалку познато место');
-  assert.equal(pois[2].name, 'Најпопуларно подалеку', 'a place outside the 50m tie group cannot jump ahead');
+  assert.equal(pois[0].name, 'Рамстор Мол', 'same distance → the better-known mall leads');
+  assert.equal(pois[1].name, 'Помалку познат мол');
+  assert.equal(pois[2].name, 'Популарен мол', 'distance still decides before renown');
   store.close();
 });
 

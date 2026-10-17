@@ -20,8 +20,16 @@ export const LANDMARK_PREFERENCE: Record<string, number> = {
   // BEFORE distance in nearestPois, so leaving diplomatic/embassy unranked
   // (→ 0) let pharmacies win every time.
   diplomatic: 5, embassy: 5, government: 5, townhall: 5,
+  // Squares are THE city reference ("кај плоштадот") — the offline map's own
+  // POI_PRIORITY ranks them first, and leaving them unranked here made the
+  // rank-aware paths treat Македонија square as an unknown shop.
+  square: 5, plaza: 5,
   mall: 5, school: 4, university: 4, hospital: 4, clinic: 4,
   police: 4, fire_station: 4,
+  // Churches/cathedrals are the anchors people give directions by ("кај
+  // Католичка црква"), yet they shared rank 3 with a pharmacy — inside the
+  // 200 m ring the significance-first ranking then served the pharmacy. A
+  // cathedral outranks a small shop, always.
   // Parks live with the institutions: "спроти паркот"/"кај паркот" is how
   // people locate a building, and a PARK IS THE PLACE ITSELF while a bus stop is
   // merely named after one. Ranking transit above it produced the 2026-10-11
@@ -30,7 +38,7 @@ export const LANDMARK_PREFERENCE: Record<string, number> = {
   // across the boulevard, 180m, the neighbourhood's best-known place) never
   // appeared. A client reads that name as the park and walks to the wrong spot.
   park: 4, kindergarten: 3, fuel: 2, atm: 2,
-  cathedral: 3, place_of_worship: 3, church: 3, mosque: 3,
+  cathedral: 4, place_of_worship: 4, church: 4, mosque: 4,
   pharmacy: 3, supermarket: 3, museum: 3, stadium: 3,
   artwork: 3, monument: 3, memorial: 3,
   // Transit stops — below the places they are named after, above nothing more

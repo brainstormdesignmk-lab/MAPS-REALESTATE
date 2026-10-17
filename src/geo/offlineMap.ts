@@ -28,7 +28,7 @@ import { normType, typeRank } from './types';
 export const SKOPJE_BBOX: [number, number, number, number] = [41.95, 21.25, 42.10, 21.55];
 
 /** Increment when landmark eligibility, distance, or tie-breaking policy changes. */
-export const LANDMARK_RANKING_POLICY_VERSION = 2;
+export const LANDMARK_RANKING_POLICY_VERSION = 3;
 
 /** Public Overpass mirrors — the build tries them in order (they are flaky —
  *  that is exactly why we go offline). */
@@ -117,6 +117,178 @@ const LAT2CYR: Array<[string, string]> = [
   ['ch', 'ч'], ['sh', 'ш'],
 ];
 
+// --- Latin diacritics -------------------------------------------------------
+// OSM and Google names carry Croatian/Serbian spellings ("Kapištec", "Čair",
+// "Železara"). The transliterator used to pass the accented letter through
+// verbatim, so the client read "Капиšтец" — half Cyrillic, half Latin, which
+// reads as a broken font. Every diacritic is folded to a spelling the digraph
+// table knows BEFORE the letter pass: "Kapištec" → "Kapishtec" → "Капиштец".
+//
+// Two folds: `digraph` produces Macedonian spelling (š → sh → ш), `ascii`
+// strips to the base Latin letter for MATCHING (š → s), where the comparison
+// already treats ш/с as one class (CYR2LAT maps ш → s).
+const LATIN_DIACRITIC_BASE: Record<string, string> = {
+  'à': 'a', 'á': 'a', 'â': 'a', 'ã': 'a', 'ä': 'a', 'å': 'a', 'ā': 'a', 'ă': 'a', 'ą': 'a',
+  'ç': 'c', 'ć': 'c', 'č': 'c', 'ď': 'd', 'đ': 'd',
+  'è': 'e', 'é': 'e', 'ê': 'e', 'ë': 'e', 'ē': 'e', 'ė': 'e', 'ę': 'e', 'ě': 'e',
+  'ǵ': 'g', 'ğ': 'g',
+  'ì': 'i', 'í': 'i', 'î': 'i', 'ï': 'i', 'ī': 'i', 'į': 'i', 'ı': 'i',
+  'ĺ': 'l', 'ļ': 'l', 'ľ': 'l', 'ł': 'l',
+  'ñ': 'n', 'ń': 'n', 'ň': 'n',
+  'ò': 'o', 'ó': 'o', 'ô': 'o', 'õ': 'o', 'ö': 'o', 'ø': 'o', 'ō': 'o', 'ő': 'o',
+  'ŕ': 'r', 'ř': 'r',
+  'ś': 's', 'š': 's', 'ş': 's', 'ș': 's', 'ß': 's',
+  'ť': 't', 'ţ': 't', 'ț': 't',
+  'ù': 'u', 'ú': 'u', 'û': 'u', 'ü': 'u', 'ů': 'u', 'ū': 'u', 'ű': 'u',
+  'ý': 'y', 'ÿ': 'y',
+  'ź': 'z', 'ż': 'z', 'ž': 'z',
+  'ḱ': 'k',
+};
+
+// Macedonian digraph spelling for the diacritics that denote a distinct
+// Macedonian letter (č = ч, not ц; š = ш, not с; ž = ж, not з).
+const LATIN_DIACRITIC_DIGRAPH: Record<string, string> = {
+  ...LATIN_DIACRITIC_BASE,
+  'ć': 'kj', 'č': 'ch', 'đ': 'gj', 'š': 'sh', 'ž': 'zh', 'ǵ': 'gj', 'ḱ': 'kj',
+  'ľ': 'lj', 'ň': 'nj', 'ř': 'r', 'ś': 's', 'ź': 'z',
+};
+
+/** Fold Latin diacritics so the Macedonian transliterator never leaves an
+ *  accented Latin letter inside a Cyrillic name. Case is preserved. */
+export function foldLatinDiacritics(s: string, mode: 'digraph' | 'ascii' = 'digraph'): string {
+  const table = mode === 'ascii' ? LATIN_DIACRITIC_BASE : LATIN_DIACRITIC_DIGRAPH;
+  let out = '';
+  for (const ch of s) {
+    const low = ch.toLowerCase();
+    const rep = table[low];
+    if (rep === undefined) { out += ch; continue; }
+    out += ch === low ? rep : rep.charAt(0).toUpperCase() + rep.slice(1);
+  }
+  return out;
+}
+
+// Cyrillic letters the map's own contributors substitute with Latin look-alikes
+// (Google/OSM rows carry "Aмбасада", "Eуpoфapм", "Блок Градски Sид", "Туpиcт").
+// Inside an already-Cyrillic word these Latin letters are HOMOGLYPHS, not an
+// English spelling: repairing "p" as п gives "Тупицт" while the map means
+// "Турист" — the look-alike (р, с, Ѕ, А, Е, …) is the intended letter.
+const LATIN_HOMOGLYPH_CYR: Record<string, string> = {
+  A: 'А', B: 'Б', C: 'С', D: 'Д', E: 'Е', F: 'Ф', G: 'Г', H: 'Н', I: 'И',
+  J: 'Ј', K: 'К', L: 'Л', M: 'М', N: 'Н', O: 'О', P: 'Р', Q: 'К', R: 'Р',
+  S: 'Ѕ', T: 'Т', U: 'У', V: 'В', W: 'В', X: 'Х', Y: 'У', Z: 'З',
+};
+
+const CYRILLIC_CHAR_RE = /[\u0400-\u04FF]/u;
+const LATIN_RE = /[A-Za-z\u00C0-\u024F]/u;
+const LATIN_ACCENTED_RE = /[\u00C0-\u024F]/u;
+
+/** Phonetic transliteration of one Latin run, keeping its capitalization
+ *  pattern ("Beer" → "Беер", "beer" → "беер", "EUPOФ" stays shouty). */
+function phoneticRun(run: string): string {
+  const cyr = toCyrillic(run);
+  if (!/[A-Z]/.test(run)) return cyr;
+  if (!/[a-z]/.test(run)) return cyr.toUpperCase();
+  return cyr.charAt(0).toUpperCase() + cyr.slice(1);
+}
+
+/** Repair a place name that mixes scripts. Two artifact classes, both real in
+ *  the map data and in names an older build already half-transliterated:
+ *
+ *   1. HOMOGLYPHS glued inside a Cyrillic word ("Aмбасада", "Sид", "Туpиcт",
+ *      "Eуpoфapм") — one or two substituted letters, repaired to the Cyrillic
+ *      letter they stand for.
+ *   2. An accented Latin letter or a real Latin WORD cut into a Cyrillic token
+ *      ("Капиšтец", "Паб Beerтија") — transliterated phonetically.
+ *
+ *  A run that stands alone between spaces/punctuation is NOT touched: the map's
+ *  bilingual rows ("Глуво куче;Gluvo Kuče", "Зен кафе (Zen Café)") are content,
+ *  and a wholly Latin token is left to displayPlaceName's word pass. Wholly
+ *  Cyrillic text passes untouched ("Карпош III" keeps its Roman numeral). */
+export function repairMixedScript(s: string): string {
+  if (!CYRILLIC_CHAR_RE.test(s) || !LATIN_RE.test(s)) return s;
+  // The dominant script of the WHOLE string breaks ties inside a word that is
+  // all homoglyphs ("АМSМ Bus Stop" is Latin; "Блок Градски Sид" is not).
+  const totalLat = (s.match(/[A-Za-z\u00C0-\u024F]/gu) ?? []).length;
+  const totalCyr = (s.match(/[\u0400-\u04FF]/gu) ?? []).length;
+  const preferLatin = totalLat > totalCyr;
+
+  // WORD by word (letters only — punctuation and spaces are boundaries, so
+  // "куче;Gluvo" is two clean words, not one mixed token). The direction of
+  // the repair depends on which script the word really is: "Aмбасада" is a
+  // Cyrillic word with homoglyphs glued in; "Post Officе" / "Buba Мara" /
+  // "AutoRentals.MК" are LATIN names with a stray Cyrillic letter — pushing
+  // those into Cyrillic ("Оффице", "Мара") would invent a translation the map
+  // never had.
+  return s.replace(/[A-Za-z\u00C0-\u024F\u0400-\u04FF]+/gu, (word) => {
+    const latinRun = /[A-Za-z\u00C0-\u024F]+/gu;
+    if (!CYRILLIC_CHAR_RE.test(word) || !LATIN_RE.test(word)) return word;
+    // Roman numerals are Latin BY CONVENTION in a Cyrillic address.
+    if (/^[IVXLC]+$/.test(word)) return word;
+    const latinLetters = (word.match(latinRun) ?? []).join('').length;
+    const cyrOnly = word.match(/[\u0400-\u04FF]/gu) ?? [];
+    const cyrLetters = cyrOnly.length;
+    const restorable = cyrOnly.every(ch => CYRILLIC_HOMOGLYPH_LAT[ch] !== undefined);
+    const ambiguous = [...word].every(ch => {
+      const up = ch.toUpperCase();
+      return CYRILLIC_CHAR_RE.test(ch)
+        ? CYRILLIC_HOMOGLYPH_LAT[ch] !== undefined
+        : LATIN_HOMOGLYPH_CYR[up] !== undefined;
+    });
+    // Go Latin only when the word is decisively Latin, or is all homoglyphs and
+    // the surrounding name is Latin ("…AutoRentals.MК", "Buba Мara"). A near-
+    // tie in a Cyrillic name is a Cyrillic word wearing Latin lookalikes
+    // ("Ресторан Кej", "Eуpoфapм").
+    if (restorable && (latinLetters >= cyrLetters * 2 + 1 || (ambiguous && preferLatin))) {
+      return word.replace(/[\u0400-\u04FF]/gu, (ch) => CYRILLIC_HOMOGLYPH_LAT[ch] ?? ch);
+    }
+    // Cyrillic-majority word: repair the Latin fragments in place.
+    return word.replace(latinRun, (run) => {
+      if (/^[IVXLC]+$/.test(run)) return run;
+      // An accented Latin letter inside a Cyrillic word is always an artifact
+      // ("Капиšтец"): the diacritic must become the Macedonian letter.
+      if (LATIN_ACCENTED_RE.test(run) || run.length >= 3) return phoneticRun(run);
+      let out = '';
+      for (const ch of run) {
+        const key = ch.toUpperCase();
+        const cyr = LATIN_HOMOGLYPH_CYR[key];
+        if (!cyr) { out += ch; continue; }
+        out += ch === key ? cyr : cyr.toLowerCase();
+      }
+      return out;
+    });
+  });
+}
+
+/** The canonical STORED/COMPARED form of a POI name: whitespace collapsed and
+ *  mixed-script homoglyph artifacts healed. Applied when the map is built (so
+ *  a weekly rebuild cannot reintroduce them) and on both sides of a name
+ *  match (a row written by an older build must stay findable by an honest
+ *  Cyrillic query). Display-only concerns stay in displayPlaceName. */
+export function cleanPoiName(name: string): string {
+  const s = String(name ?? '');
+  // The whitespace tidy allocates; only pay for it when the row needs it
+  // (this runs per row on the findPoiByName scan, ~6k rows per call).
+  // [^\S ] = any whitespace that is not a plain space (tab/newline).
+  const tidy = /^\s|\s$|\s{2,}|[^\S ]/.test(s) ? s.replace(/\s+/g, ' ').trim() : s;
+  return repairMixedScript(tidy);
+}
+
+/** The same healing for the map's STREET names (addresses table). A street
+ *  stored as "Kоце Mеталец" is just as unmatchable as a POI, and the geocoder
+ *  keys on it. */
+export const cleanStreetName = cleanPoiName;
+
+// The reverse homoglyph table — Cyrillic letters that stand in for a Latin
+// one inside a LATIN name ("Post Officе", "Buba Мara", "AutoRentals.MК").
+// Deliberately excludes the letters a Macedonian word genuinely uses where the
+// Latin reading would be wrong outside a Latin-majority token.
+const CYRILLIC_HOMOGLYPH_LAT: Record<string, string> = {
+  'А': 'A', 'В': 'B', 'Е': 'E', 'К': 'K', 'М': 'M', 'Н': 'H', 'О': 'O',
+  'Р': 'P', 'С': 'C', 'Т': 'T', 'У': 'Y', 'Х': 'X', 'Ѕ': 'S', 'Ј': 'J', 'І': 'I',
+  'а': 'a', 'в': 'b', 'е': 'e', 'к': 'k', 'м': 'm', 'н': 'h', 'о': 'o',
+  'р': 'p', 'с': 'c', 'т': 't', 'у': 'y', 'х': 'x', 'ѕ': 's', 'ј': 'j', 'і': 'i',
+};
+
 // The embassies Skopje clients actually name — "Црногорската амбасада" vs
 // the map's "Embassy of Montenegro". Bounded dictionary, not open translation.
 const EMBASSY_COUNTRY_EN: Record<string, string> = {
@@ -150,7 +322,7 @@ const EMBASSY_COUNTRY_EN: Record<string, string> = {
 
 export function toLatin(s: string): string {
   let out = '';
-  for (const ch of s.toLowerCase()) {
+  for (const ch of foldLatinDiacritics(s.toLowerCase(), 'ascii')) {
     const hit = CYR2LAT.find(([k]) => k === ch);
     out += hit ? hit[1] : ch;
   }
@@ -158,7 +330,7 @@ export function toLatin(s: string): string {
 }
 
 export function toCyrillic(s: string): string {
-  const low = s.toLowerCase();
+  const low = foldLatinDiacritics(s.toLowerCase());
   let out = '';
   let i = 0;
   while (i < low.length) {
@@ -208,7 +380,7 @@ export function translitToLatin(s: string): string {
     'о': 'o', 'п': 'p', 'р': 'r', 'с': 's', 'т': 't', 'ќ': 'kj', 'у': 'u', 'ф': 'f', 'х': 'h',
     'ц': 'c', 'ч': 'ch', 'џ': 'dzh', 'ш': 'sh',
   };
-  return s.toLowerCase().split('').map(c => map[c] ?? c).join('');
+  return foldLatinDiacritics(s.toLowerCase()).split('').map(c => map[c] ?? c).join('');
 }
 
 /** Tolerant name key: transliterate + lowercase + strip punctuation/spaces.
@@ -359,6 +531,64 @@ export function identityKey(name: string): string {
   return [...new Set(identityTokens(name))].sort().join(' ');
 }
 
+// ── RETRIEVAL TOKENS (client-typed place words) ─────────────────────────────
+// identityTokens() canonicalizes the DISTINCTIVE words of a name; it drops the
+// venue words (mall / trgovski / shopping / centar) because they never say
+// WHICH place is meant. That is right for dedupe and wrong for LOOKUP: a
+// client asks for „BUNJAKOVEC TRGOVSKI“ — place name + venue word, in the
+// opposite order and the other language from the map's own
+// „Shopping Center Bunjakovec“. Substring matching can never bridge that
+// (there is no contiguous run of characters shared by both strings), so the
+// phrase resolved to NOTHING and the distance answer fell through to the
+// service question. Retrieval therefore needs the same bilingual vocabulary
+// in an ORDER-INDEPENDENT form, with the venue words KEPT.
+// Latin forms only — stripDefinite() transliterates before stripping, so the
+// Cyrillic spellings („трговскиот“) arrive here as trgovskiot.
+const DEFINITE_SUFFIXES_LOOKUP = ['ot', 'ov', 'ta', 'to', 'te', 'iot'];
+
+/** The word with the client's definite article removed („trgovskiot“ →
+ *  „trgovski“, „centarot“ → „centar“). Never below four characters, so
+ *  „тато“ cannot become „та“. */
+function stripDefinite(word: string): string {
+  const latin = translitToLatin(word);
+  for (const suffix of DEFINITE_SUFFIXES_LOOKUP) {
+    if (!latin.endsWith(suffix)) continue;
+    const stem = latin.slice(0, -suffix.length);
+    if (stem.length >= 4) return stem;
+  }
+  return latin;
+}
+
+/** Canonical lexicon form of one word, tolerating the definite article the
+ *  client writes („trgovskiot“ / „трговскиот“). A stem is only accepted when
+ *  it lands on a KNOWN lexicon word — no open-ended stemming. */
+function lexiconForm(word: string): string {
+  if (LEXICON_WORDS[word]) return LEXICON_WORDS[word];
+  const latin = translitToLatin(word);
+  if (LEXICON_WORDS[latin]) return LEXICON_WORDS[latin];
+  const stem = stripDefinite(word);
+  if (stem !== latin && LEXICON_WORDS[stem]) return LEXICON_WORDS[stem];
+  return latin;
+}
+
+/** Ordered-independent, bilingual token set of a place name, venue words KEPT.
+ *  "Shopping Center Bunjakovec" → ['shopping','center','bunjakovec']
+ *  "BUNJAKOVEC TRGOVSKI"        → ['bunjakovec','shopping'] */
+export function placeLookupTokens(name: string): string[] {
+  let t = translitToLatin(name)
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  for (const [from, to] of LEXICON_PHRASES) t = t.split(from).join(to);
+  const out: string[] = [];
+  for (const word of t.split(' ')) {
+    if (!word) continue;
+    const canon = lexiconForm(word);
+    if (canon && !STOPWORDS.has(canon) && !out.includes(canon)) out.push(canon);
+  }
+  return out;
+}
+
 /** Distance bounds shared by the map build (identity-heal.ts) and the runtime
  *  dedupe (nearestPois) — one rule, two call sites, so the build and the
  *  request path can never disagree about what "one place" means. */
@@ -473,14 +703,23 @@ export function samePlaceName(
 
   const subset = [...ta].every(t => tb.has(t)) || [...tb].every(t => ta.has(t));
   const smaller = ta.size <= tb.size ? ta : tb;
+  const larger = ta.size <= tb.size ? tb : ta;
   const distinctive = [...smaller].some(t => t.length >= 4);
+  // A BRANCH NUMBER is the only thing the larger name adds ("Веро Центар" vs
+  // "Веро 9", 14m apart): the digit identifies WHICH shop, not a spelling of
+  // the same one. "Бит Пазар" vs "Бит Пазар 1" already stay apart by the token
+  // rule; the subset tier must not undo that merely because one row carries
+  // Google's identity (the Vero Center mall and the Vero supermarket inside
+  // it are two businesses in one building, like the bank-in-mall case).
+  const onlyDigitsAdded = [...larger].every(t => smaller.has(t) || /^\d+$/.test(t))
+    && [...larger].some(t => !smaller.has(t));
   const exclusiveIdentity = hasIdentityA !== hasIdentityB;
   // The qualifier guard applies here too: "Embassy of Republic of Turkey"
   // contains "Turkish Embassy (Residence)", but the residence is a DIFFERENT
   // building — containment must never fuse an institution with its
   // consular section / residence.
   const qualifierAgrees = hasIdentityQualifier(nameA) === hasIdentityQualifier(nameB);
-  if (subset && distinctive && exclusiveIdentity && qualifierAgrees
+  if (subset && distinctive && exclusiveIdentity && qualifierAgrees && !onlyDigitsAdded
       && distanceM <= IDENTITY_SUBSET_RADIUS) {
     return { same: true, tier: 'subset' };
   }
@@ -804,35 +1043,25 @@ export class OfflineMapStore {
     ]);
     const secondaryTransit = (type: string): number => TRANSIT_TYPES.has(normType(type)) ? 1 : 0;
 
-    // STEP 4 — prominence may decide only within a fixed, 50m distance group.
-    // Groups are anchored at their nearest member to avoid a non-transitive
-    // pairwise comparator (A~B and B~C must not let C jump ahead of A).
-    const DISTANCE_TIE_BAND_M = 50;
+    // STEP 4 — SIGNIFICANCE FIRST inside the ring. A client navigates by the
+    // embassy, the mall, the school or the church ("кај Католичка"), not by
+    // the pharmacy that merely happens to be 20 m closer: typeRank decides,
+    // and only equal-significance places are ordered by distance. The caller's
+    // radius is the honesty cap (200 m for "во близина" claims) — significance
+    // never reaches outside it. Google prominence still breaks distance ties
+    // inside a class (a busy branch is the one people mean), and transit stops
+    // stay a fallback pool, never crowding out a real place.
     const prominence = (r: { review_count?: number | null; closed?: number | null; source?: string }): number => {
       if (r.closed === 1) return -1;
       const base = Math.log10((r.review_count ?? 0) + 1);
       return r.source === 'google' ? base + 0.01 : base;
     };
-    const rankByProximity = <T extends { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string }>(items: T[]): T[] => {
-      const out: T[] = [];
-      for (const transitGroup of [0, 1]) {
-        const candidates = items
-          .filter(p => secondaryTransit(p.type) === transitGroup)
-          .sort((a, b) => a.dist - b.dist || a.name.localeCompare(b.name));
-        for (let start = 0; start < candidates.length;) {
-          let end = start + 1;
-          while (end < candidates.length && candidates[end].dist - candidates[start].dist <= DISTANCE_TIE_BAND_M) end++;
-          const close = candidates.slice(start, end).sort((a, b) =>
-            (prominence(b) - prominence(a))
-            || (a.dist - b.dist)
-            || (typeRank(b.type) - typeRank(a.type))
-            || a.name.localeCompare(b.name));
-          out.push(...close);
-          start = end;
-        }
-      }
-      return out;
-    };
+    const bySignificance = (a: { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string },
+                            b: { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string }): number =>
+      typeRank(b.type) - typeRank(a.type)
+      || a.dist - b.dist
+      || prominence(b) - prominence(a)
+      || a.name.localeCompare(b.name);
     // SAME-PLACE COLLAPSE — the ONE bilingual identity rule (samePlacePoi),
     // shared with the map build (scripts/identity-heal.ts), so the request
     // path can never disagree with what the build merged:
@@ -856,17 +1085,17 @@ export class OfflineMapStore {
       }
       merged.push(poi);
     }
-    // STEP 5 — choose the unique candidate pool by distance BEFORE popularity
-    // ranking. Ordinary places fill the cap first; transit stops fill unused
-    // slots only as fallbacks, so a dense stop cluster cannot crowd out a real
-    // public place. A verified Google identity may change merged coordinates,
-    // so this ordering uses the post-merge distances.
-    const primaryPool = merged.filter(p => secondaryTransit(p.type) === 0).sort(byDistance).slice(0, limit);
+    // STEP 5 — the significance-ordered pool. Ordinary places fill the cap
+    // first; transit stops fill unused slots only as fallbacks, so a dense
+    // stop cluster cannot crowd out a real public place. A verified Google
+    // identity may change merged coordinates, so the order uses the
+    // post-merge distances.
+    const primaryPool = merged.filter(p => secondaryTransit(p.type) === 0).sort(bySignificance).slice(0, limit);
     const transitPool = primaryPool.length < limit
-      ? merged.filter(p => secondaryTransit(p.type) === 1).sort(byDistance).slice(0, limit - primaryPool.length)
+      ? merged.filter(p => secondaryTransit(p.type) === 1).sort(bySignificance).slice(0, limit - primaryPool.length)
       : [];
     const candidates = [...primaryPool, ...transitPool];
-    return rankByProximity(candidates).map(p => ({
+    return candidates.map(p => ({
       name: p.name,
       type: p.type,
       distance_m: Math.round(p.dist),
@@ -990,7 +1219,9 @@ export class OfflineMapStore {
    *  completely unknown street. */
   private resolveKey(street: string): string | undefined {
     if (!this.db || !street) return undefined;
-    const rawKey = streetKey(street);
+    // A query echoed from a legacy artifact ("Kоце Mеталец") must key the same
+    // as the healed street row.
+    const rawKey = streetKey(cleanStreetName(street));
     if (!rawKey) return undefined;
     const exactRows = this.db.prepare('SELECT COUNT(*) AS n FROM addresses WHERE key = ?').get(rawKey) as { n: number };
     return exactRows.n > 0 ? rawKey : (this.fuzzyKey(rawKey) ?? rawKey);
@@ -1164,11 +1395,12 @@ export class OfflineMapStore {
    *  Returns true when a row was written. */
   learnAddress(address: string, lat: number, lon: number): boolean {
     if (!this.db || !address) return false;
-    const key = streetKey(address);
-    const houseNum = extractHouseNum(address);
+    const src = cleanStreetName(address);
+    const key = streetKey(src);
+    const houseNum = extractHouseNum(src);
     // Display name: the original-case street without the trailing number
     // (normalizeStreet lowercases — fine for keys, ugly for display).
-    const street = address.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
+    const street = src.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
     if (!key || key.length < 3 || !houseNum || !street) return false;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
     // Writes need a READ-WRITE connection — open it lazily and keep it (a
@@ -1210,11 +1442,12 @@ export class OfflineMapStore {
    *  true when the anchor row was written. */
   learnStreet(street: string, lat: number, lon: number): boolean {
     if (!this.db || !street) return false;
-    const key = streetKey(street);
+    const src = cleanStreetName(street);
+    const key = streetKey(src);
     // Display name: original case, no trailing house number (same rule as
     // learnAddress — normalizeStreet lowercases, fine for keys, ugly for
     // display and for later per-number learning on the same street).
-    const name = street.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
+    const name = src.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
     if (!key || key.length < 3 || !name) return false;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
     if (!this.rwDb) {
@@ -1355,13 +1588,17 @@ export class OfflineMapStore {
     // ("ТЦ Скопјанка"). Match in BOTH canonical scripts: the raw needle and
     // the transliterated one. The POI row's folded Latin form is precomputed
     // once per call from the already-loaded table (sub-ms at 4k rows).
-    const needle = clean.toLowerCase();
+    // Heal an artifact in the NEEDLE too (a client echoing a name we once
+    // showed them wrong, or typing a homoglyph from a copy-paste).
+    const needle = repairMixedScript(clean).toLowerCase();
     const needleCyr = /[\\u0400-\\u04FF]/.test(needle) ? needle : toCyrillic(needle);
     let rows = (this.db.prepare(
       'SELECT name, type, lat, lon, place_url, place_id FROM pois'
     ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string }>)
       .filter(r => {
-        const low = r.name.toLowerCase();
+        // A row from an older build may still carry the artifact: compare on
+        // the healed form so an honest Cyrillic query still finds it.
+        const low = cleanPoiName(r.name).toLowerCase();
         return low.includes(needle) || low.includes(needleCyr)
           || translitToLatin(low).includes(needle);
       });
@@ -1384,23 +1621,115 @@ export class OfflineMapStore {
           'SELECT name, type, lat, lon, place_url FROM pois'
         ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string }>)
           .filter(r => {
-            const low = r.name.toLowerCase();
+            const low = cleanPoiName(r.name).toLowerCase();
             return low.includes(short) || translitToLatin(low).includes(short);
           });
         if (rows.length > 0) break;
       }
     }
+    // ORDER-INDEPENDENT / TRANSLATED FALLBACK — the last resort before MISS.
+    // Only runs when every character-level pass above found nothing, so it can
+    // never displace an exact, alias, prefix or substring hit. A row matches
+    // when it carries EVERY token the client typed (venue words included, see
+    // placeLookupTokens):
+    //   "Bunjakovec trgovski" → ['bunjakovec','shopping']
+    //   map row "Shopping Center Bunjakovec" → ['shopping','center','bunjakovec'] ✔
+    // Word order, script and language no longer matter; a wrong place cannot
+    // slip in, because the DISTINCTIVE token (the place name) must be present.
+    if (rows.length === 0) {
+      const want = placeLookupTokens(clean);
+      // A WHICH-word is required. identityTokens() is the distinctive part of
+      // the name (venue words dropped), so a bare "centarot" / "trgovskiot"
+      // can never turn a deliberate MISS into an arbitrary nearby venue — the
+      // fallback only fires when the client named a place as well. The
+      // definite article comes off first, or „centarot“ would survive as a
+      // distinctive word of its own.
+      const distinctive = identityTokens(
+        clean.split(/\s+/).map(stripDefinite).join(' '));
+      // …and it must contain a PROPER NOUN. A phrase built entirely from the
+      // lexicon („Црногорска амбасада“ = montenegro + embassy) is generic
+      // vocabulary that already has its own, tighter bridges (the embassy
+      // alias rewrite, the identity tiers) — letting the order-free pass
+      // answer it here changes WHICH property those lanes bind, which is not
+      // this fallback's job. A real place name always contributes at least one
+      // word the lexicon does not know („bunjakovec“).
+      const hasProperNoun = translitToLatin(clean)
+        .replace(/[^a-z\s]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean)
+        .some(w => !LEXICON_WORDS[w] && !LEXICON_WORDS[stripDefinite(w)]
+          && !STOPWORDS.has(w) && !STOPWORDS.has(stripDefinite(w)));
+      if (want.length > 0 && distinctive.length > 0 && hasProperNoun
+        && want.every(w => w.length >= 3)) {
+        const wantSet = new Set(want);
+        const tokenRows = (this.db.prepare(
+          'SELECT name, type, lat, lon, place_url, place_id FROM pois'
+        ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string }>)
+          .filter(r => {
+            const have = new Set(placeLookupTokens(cleanPoiName(r.name)));
+            for (const w of wantSet) if (!have.has(w)) return false;
+            return true;
+          });
+        // Prefer the row that matches the query EXACTLY as a token set (fewest
+        // extra words: "Shopping Center Bunjakovec" beats "KAM Market -
+        // Bunjakovec Shopping Center" for „Bunjakovec trgovski“), then the
+        // SIGNIFICANT row over a same-named lesser one (the OSM rows called
+        // „Трговски Центар Буњаковец“ are BUS STOPS 300 m up the boulevard;
+        // the mall itself ranks 5 and must win, exactly as in nearestPois),
+        // then the nearest branch to the client's context.
+        //
+        // The answer is returned HERE, not handed to the substring ranking
+        // below: that ranking is distance-first, and the nearest same-named row
+        // is precisely the transit stop rather than the place.
+        if (tokenRows.length > 0) {
+          const extra = (r: { name: string }): number =>
+            placeLookupTokens(cleanPoiName(r.name)).length - wantSet.size;
+          tokenRows.sort((a, b) =>
+            extra(a) - extra(b)
+            || typeRank(b.type) - typeRank(a.type)
+            || (center
+              ? distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon)
+              : a.name.length - b.name.length));
+          const best = tokenRows[0];
+          try { fs.appendFileSync('/tmp/landmark-debug.log',
+            `[${new Date().toISOString()}] findPoiByName(${clean}): TOKEN-SET ${tokenRows.length} matches → ${best.name} (${best.lat},${best.lon})\n`); } catch {}
+          return { lat: best.lat, lon: best.lon, name: best.name, place_url: best.place_url ?? undefined, place_id: best.place_id ?? undefined };
+        }
+      }
+    }
     if (rows.length > 0) {
+      // MATCH QUALITY FIRST — the documented contract (exact > alias >
+      // starts-with > contains) that the filter alone never enforced. A client
+      // asking about "Diamond Mall" got "Civil - Diamond Mall" (the nearest
+      // containing row) although the map holds the EXACT place; "ГТЦ" matched
+      // "ГТЦ Кула 1" (a tower) instead of the mall whose own name carries the
+      // acronym in parentheses. Distance then picks the branch.
+      const latinNeedle = translitToLatin(needle);
+      // A PARENTHETICAL ALIAS is the map's own statement that this row IS the
+      // acronym: "City Trade Center Skopje (GTC)", "Градски трговски центар
+      // (ГТЦ)". It must beat a longer row that merely starts with the letters
+      // ("ГТЦ Кула 1", "GTC Apart Hotel") — those are PARTS of the place.
+      const esc = (s: string): string => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const aliasRank = (name: string, n: string): number =>
+        new RegExp(`[（(]\\s*${esc(n)}\\s*[)）]`, 'iu').test(name) ? 1 : 0;
+      const matchRank = (name: string): number => {
+        const low = name.toLowerCase();
+        const latin = translitToLatin(low);
+        if (low === needle || low === needleCyr || latin === latinNeedle) return 0;
+        if (aliasRank(name, needle) || aliasRank(name, needleCyr)) return 1;
+        if (low.startsWith(needle) || low.startsWith(needleCyr) || latin.startsWith(latinNeedle)) return 2;
+        return 3;
+      };
       // Branch disambiguation: chains (TTK Banka, Tinex, Kipper…) have many
       // rows sharing one name. "Nearest to the client's context" (the shown
       // property) is the branch they mean — NEVER a global shortest-name
       // pick, which sent a Капиштец client to a Ново Лисиче branch.
-      if (center) {
-        rows.sort((a, b) =>
-          distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon));
-      } else {
-        rows.sort((a, b) => a.name.length - b.name.length);
-      }
+      rows.sort((a, b) =>
+        matchRank(a.name) - matchRank(b.name)
+        || (center
+          ? distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon)
+          : a.name.length - b.name.length)
+        || a.name.length - b.name.length);
       const best = rows[0];
       try { fs.appendFileSync('/tmp/landmark-debug.log',
         `[${new Date().toISOString()}] findPoiByName(${clean}): ${rows.length} matches → ${best.name} (${best.name.length} chars)\n`); } catch {}
@@ -1673,7 +2002,7 @@ function applyOverrides(db: Database.Database, file: string): number {
       .get(p.name, p.lat, p.lon) as { n: number }).n;
     if (n > 0) continue;
     db.prepare(`INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(place_id) DO UPDATE SET name = excluded.name, lat = excluded.lat, lon = excluded.lon`)
-      .run(p.name, p.type, p.lat, p.lon, 'osm', p.place_id ?? null);
+      .run(cleanPoiName(p.name), p.type, p.lat, p.lon, 'osm', p.place_id ?? null);
     added++;
   }
 
@@ -1682,19 +2011,20 @@ function applyOverrides(db: Database.Database, file: string): number {
     if (!r.name || !r.type || !Number.isFinite(r.lat ?? NaN) || !Number.isFinite(r.lon ?? NaN)) continue;
     const del = db.prepare('DELETE FROM pois WHERE name = ?').run(r.name);
     db.prepare(`INSERT INTO pois (name, type, lat, lon, source, place_id) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(place_id) DO UPDATE SET name = excluded.name, lat = excluded.lat, lon = excluded.lon`)
-      .run(r.name, r.type, r.lat, r.lon, 'osm', r.place_id ?? null);
+      .run(cleanPoiName(r.name), r.type, r.lat, r.lon, 'osm', r.place_id ?? null);
     added += del.changes + 1;
   }
 
   // --- Addresses (exact house numbers OSM never mapped, e.g. Стефановски 16) ---
   for (const a of ov.addresses ?? []) {
     if (!a.street || !Number.isFinite(a.lat ?? NaN) || !Number.isFinite(a.lon ?? NaN)) continue;
-    const key = streetKey(a.street);
+    const street = cleanStreetName(a.street);
+    const key = streetKey(street);
     const n = (db.prepare('SELECT COUNT(*) AS n FROM addresses WHERE key = ? AND housenumber = ?')
       .get(key, a.housenumber ?? '') as { n: number }).n;
     if (n > 0) continue;
     db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key) VALUES (?, ?, ?, ?, ?)')
-      .run(a.street, a.housenumber ?? '', a.lat, a.lon, key);
+      .run(street, a.housenumber ?? '', a.lat, a.lon, key);
     added++;
   }
 
@@ -1807,14 +2137,17 @@ export function writeMap(
         types = excluded.types,
         closed = excluded.closed`);
       for (const p of pois) insPoi.run(
-        p.name, p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null, p.place_id ?? null,
+        cleanPoiName(p.name), p.type, p.lat, p.lon, p.source ?? 'osm', p.place_url ?? null, p.place_id ?? null,
         p.review_count ?? null, p.rating ?? null, p.plus_code ?? null, p.phone ?? null,
         p.website ?? null, p.price_level ?? null, p.closed ?? 0, p.types ?? null,
       );
       console.log(`[skopje-map] inserted ${pois.length} POIs`);
 
       const insAddr = db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key, source) VALUES (?, ?, ?, ?, ?, ?)');
-      for (const a of addresses) insAddr.run(a.street, a.housenumber, a.lat, a.lon, streetKey(a.street), a.source ?? '');
+      for (const a of addresses) {
+        const street = cleanStreetName(a.street);
+        insAddr.run(street, a.housenumber, a.lat, a.lon, streetKey(street), a.source ?? '');
+      }
       console.log(`[skopje-map] inserted ${addresses.length} addresses`);
       // Manual corrections folded INTO the build (address-overrides.json next
       // to the target DB) so a weekly OSM rebuild never wipes them. Skips

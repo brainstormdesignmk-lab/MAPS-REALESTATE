@@ -100,7 +100,7 @@ export function importPropertyGeo(feedRow: ImportFeedRow, deps: ImportGeoDeps): 
   // Trusted exact/interpolated center → nearby POIs computed OFFLINE right now,
   // centered on the RESOLVED BUILDING. LandmarkService.nearbyLandmarks caches
   // the top landmark (tier osm_poi) + the rotation list keyed by property_id;
-  // client-facing claims stay capped at 500m.
+  // client-facing claims stay inside the 200m ring (FEED_LANDMARK_MAX_M).
   const svc = new LandmarkService(db, { offlineMap });
   const row: PropertyRow = {
     id: propertyId,

@@ -72,11 +72,12 @@ test('pruneOutsideBbox deletes every foreign row and keeps all Skopje rows', () 
 
 // ── 3. Feed landmark pairs top up the rotation ───────────────────────
 
-test('feed landmark chain tops the rotation up (deduped, coords only)', () => {
+test('feed landmark chain never reaches outside the 200m ring (deduped, coords only)', () => {
   const dbPath = path.join(os.tmpdir(), `bbox-pairs-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
-  // POIs near Бутелска 4, Бутел: only ONE within the 500m POI cap; the chain
-  // anchor "ТЦ Бутел" sits at ~700m — validated by the map (≤900m window) but
-  // OUTSIDE the POI rotation → only the pair top-up can bring it in.
+  // POIs near Бутелска 4, Бутел: the school is ~120m (in ring); the chain
+  // anchor "ТЦ Бутел" sits at ~700m. The chain is map-validated (≤900m) but a
+  // 700m place is NOT "во близина" any more — the 200m ring governs both the
+  // POI scan and the description anchors.
   writeMap(dbPath, [
     { name: 'ОУ Страхинја Гавриловић', type: 'school', lat: 42.0015, lon: 21.4045, source: 'osm' }, // ≈120m
     { name: 'ТЦ Бутел', type: 'mall', lat: 42.0055, lon: 21.4060, source: 'osm' },                  // ≈700m
@@ -87,14 +88,17 @@ test('feed landmark chain tops the rotation up (deduped, coords only)', () => {
     id: 57, eb: 57, address: 'Бутелска 4', location: 'Бутел',
     lat: 42.0005, lon: 21.4045, geo_source: 'stored',
     // The feed's own chain: school (also a POI hit — dedupe check), ТЦ Бутел
-    // (map-validated, beyond the POI cap — MUST be topped in), and an anchor
+    // (map-validated but outside the ring — must NOT be served), and an anchor
     // with no map row (must NOT carry invented coords).
     details: 'во потегот меѓу ОУ Страхинја Гавриловић и ТЦ Бутел, спроти скопската градина.',
   });
   try {
     const names = nearby.map(n => n.landmark);
     assert.ok(names.includes('ОУ Страхинја Гавриловић'), `POI anchor present: ${names.join(' | ')}`);
-    assert.ok(names.includes('ТЦ Бутел'), `map-validated chain anchor must top the rotation up beyond the 500m POI cap: ${names.join(' | ')}`);
+    assert.equal(names.filter(n => n === 'ОУ Страхинја Гавриловић').length, 1,
+      `the chain's duplicate of the same school is deduped: ${names.join(' | ')}`);
+    assert.ok(!names.includes('ТЦ Бутел'),
+      `a ~700m chain anchor is a distance answer, never "во близина": ${names.join(' | ')}`);
     assert.ok(!names.some(n => /скопската градина/i.test(n)), `unvalidated anchor must not appear: ${names.join(' | ')}`);
     assert.ok(nearby.every(n => Number.isFinite(n.lat) && Number.isFinite(n.lon)), 'every served anchor carries real coords');
   } finally { osm.close(); fs.rmSync(dbPath, { force: true }); }

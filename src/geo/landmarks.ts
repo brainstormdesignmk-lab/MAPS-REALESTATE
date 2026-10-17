@@ -99,7 +99,15 @@ function feedRosterSlots(
 ): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
   const out: Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
   const seen = new Set<string>();
-  const near = center.lat && center.lon ? { lat: center.lat, lon: center.lon } : undefined;
+  // A claim is only honest when it can be MEASURED. The declared distance_m
+  // stored in the feed is not evidence: it was written at import time from a
+  // centre that may since have changed (or never existed — EB 42/46 carry no
+  // coordinates at all) and it is not re-checked. Without a real centre the
+  // entry is an unverifiable assert, so it is dropped (the caller falls back
+  // to the honest neighborhood line).
+  const hasCenter = Number.isFinite(center.lat) && Number.isFinite(center.lon)
+    && (center.lat !== 0 || center.lon !== 0);
+  const near = hasCenter ? { lat: center.lat, lon: center.lon } : undefined;
   for (const e of p.landmarks ?? []) {
     if (out.length >= ROTATION_SLOTS) break;
     const name = String(e?.landmark ?? '').trim();
@@ -121,6 +129,19 @@ function feedRosterSlots(
     }
     if (lat == null || lon == null) {
       try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" not pinnable (stale roster entry)\n`); } catch {}
+      continue;
+    }
+    // RING GUARD: the roster was built under an older cap (500 m). A slot we
+    // can measure beyond the current ring is not a "во близина" claim any
+    // more — drop it and let the map scan serve the in-ring places. No centre
+    // → no measurement → no claim.
+    if (!near) {
+      try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre to measure from\n`); } catch {}
+      continue;
+    }
+    const claimM = _distM(near.lat, near.lon, lat, lon);
+    if (claimM > FEED_LANDMARK_MAX_M) {
+      try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" ${Math.round(claimM)}m > ${FEED_LANDMARK_MAX_M}m\n`); } catch {}
       continue;
     }
     seen.add(key);
@@ -442,13 +463,17 @@ function publicPlace(l: Landmark | undefined): Landmark | undefined {
   return l;
 }
 
-/** The client-facing ceiling for a landmark claim, in metres. The runtime
- *  rotation (nearbyLandmarks) has always capped its claims here, and the feed
- *  enricher writes with the same rule — anything farther is a different
- *  neighbourhood, not "во близина". The reader (properties.parseFeedLandmarks)
- *  enforces it too, because rows written before the cap still carry 600 m–1.2 km
- *  entries and a stored list must not be able to smuggle one past the rule. */
-export const FEED_LANDMARK_MAX_M = 500;
+/** The client-facing ceiling for a "во близина" claim, in metres. 200 m is
+ *  the walk-out-the-door ring: inside it the most RECOGNIZABLE place wins
+ *  (embassy, mall, church, school), because that is what a client navigates by;
+ *  farther away a name stops being "nearby" and the claim becomes geography
+ *  the property cannot honestly support. The runtime rotation
+ *  (nearbyLandmarks), the feed enricher and the reader
+ *  (properties.parseFeedLandmarks) all use this one number — legacy rows carry
+ *  300 m–1.2 km entries and a stored list must not smuggle one past the rule.
+ *  A DISTANCE QUESTION ("колку далеку е од GTC?") is NOT a proximity claim and
+ *  is answered from the whole city map — see the handler's distance lane. */
+export const FEED_LANDMARK_MAX_M = 200;
 
 /** Strip OUR OWN list annotation from an LLM answer.
  *
@@ -621,7 +646,9 @@ export class LandmarkService {
         propGeo = p.address && this.opts.offlineMap?.available
           ? this.opts.offlineMap.geocodeAddress(p.address) : undefined;
       } catch { propGeo = undefined; }
-      const FEED_MAX_DISTANCE_M = 800;
+      // The SAME ring the client-facing claim obeys — a feed landmark the chat
+      // cannot honestly call "во близина" is not a usable answer here either.
+      const FEED_MAX_DISTANCE_M = FEED_LANDMARK_MAX_M;
       type PoiHit = { lat: number; lon: number; name: string; place_url?: string; place_id?: string } | undefined;
       // PIN, NOT SEARCH (the banned link form): the feed stores Google's
       // *name-search* URL ("maps/search/?api=1&query=<name>"), which opens a
@@ -783,7 +810,8 @@ export class LandmarkService {
    *  Uses resolveSearchCenter (property.lat/lon only, no geocodeAddress in
    *  request path). If the center is untrusted, pushes to the re-resolve
    *  queue and returns empty — the handler serves an honest fallback.
-   *  Client-facing claims are capped at 500m. */
+   *  Client-facing claims are capped at FEED_LANDMARK_MAX_M (200 m), and the
+   *  order inside that ring is significance-first. */
   nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
     const center = resolveSearchCenter(p);
 
@@ -835,66 +863,34 @@ export class LandmarkService {
     }
 
     if (!center.trusted) {
-      // GRACE DEGRADATION (the 20:51 bug): osm_low_confidence means the
-      // centroid may be neighborhood-level, not building-level. When the
-      // row still carries REAL coordinates, we may serve the nearest named
-      // POIs with a floor on the claimed distance — a coarse center can
-      // only make the true distance LARGER, never smaller. The 500m
-      // client-facing cap plus the 300m floor keeps every claim honest;
-      // only rows with NO coordinates at all stay fully blocked (a (0,0)
-      // pin would be invented geography).
-      const hasRealCoords = !!p.lat && !!p.lon && (p.lat !== 0 || p.lon !== 0);
-      if (!hasRealCoords) {
-        try {
-          this.db.db.prepare(
-            `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
-          ).run(p.id, 'low_confidence_center', new Date().toISOString());
-        } catch {}
-        try { dbgLog(
-          `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-BLOCKED center untrusted and coordinate-less (lat=${center.lat}, lon=${center.lon}) → queue\n`); } catch {}
-        return [];
-      }
-      const lat = p.lat as number;
-      const lon = p.lon as number;
+      // NO GRACE CLAIMS (the 200 m ring). A low-confidence centre is a
+      // neighborhood centroid, not a building point: any POI around it may be
+      // a few hundred metres from the real door in either direction, so a
+      // "во близина на X" built on it is invented geography. The old
+      // 300 m-floor / 500 m-ceiling compromise cannot exist inside a 200 m
+      // ring (the floor is outside the cap), so the turn is honestly empty
+      // and the row is queued for a real geocode.
       try {
         this.db.db.prepare(
           `INSERT OR IGNORE INTO geo_reresolve_queue (property_id, reason, created_at) VALUES (?, ?, ?)`
         ).run(p.id, 'low_confidence_center', new Date().toISOString());
       } catch {}
       try { dbgLog(
-        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-GRACE low-confidence coords (${lat},${lon}) — serving ≥300m-floor POIs\n`); } catch {}
-      // Use the row's REAL coordinates — resolveSearchCenter deliberately
-      // refused them and may have fallen back to (0,0) when the local
-      // geocoder can't match the street.
-      const pois = this.opts.offlineMap?.available
-        ? this.opts.offlineMap.nearestPois(lat, lon, 900, 50) : [];
-      // 300m floor: a neighborhood centroid can be hundreds of meters off,
-      // so anything closer might in truth be farther. Name, ≥300m, ≤500m.
-      const graced = pois
-        .filter(poi => {
-          const d = poi.distance_m ?? Number.POSITIVE_INFINITY;
-          return d >= 300 && d <= 500 && poi.name?.length >= 3 && poi.lat != null && poi.lon != null;
-        })
-        .slice(0, 3)
-        .map(poi => ({ landmark: poi.name, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
-      if (graced.length > 0) return graced;
-      // Sparse map around the centroid → honest fallback for this turn.
+        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-BLOCKED center untrusted (lat=${center.lat}, lon=${center.lon}) → queue\n`); } catch {}
       return [];
     }
 
-    // Adaptive widening — POI search; client-facing claims capped at 500m
+    // THE RING — one radius, the honesty cap. Inside 200 m the map's own
+    // significance-first order decides (embassy/mall/church/school before the
+    // closer pharmacy — see OfflineMapStore.nearestPois). No adaptive
+    // widening: 200 m IS the claim, so a sparse block gets fewer names rather
+    // than a farther place presented as "nearby".
     let found: Array<{ name: string; distance_m: number; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
     if (this.opts.offlineMap?.available) {
-      for (const radius of [150, 300, 600, 900]) {
-        const pois = this.opts.offlineMap.nearestPois(center.lat, center.lon, radius, 50);
-        if (pois.length >= 3 || radius === 900) {
-          found = pois
-            .filter(poi => poi.distance_m <= 500 && poi.lat != null && poi.lon != null)
-            .slice(0, 3)
-            .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
-          break;
-        }
-      }
+      found = this.opts.offlineMap.nearestPois(center.lat, center.lon, FEED_LANDMARK_MAX_M, 50)
+        .filter(poi => poi.distance_m <= FEED_LANDMARK_MAX_M && poi.lat != null && poi.lon != null)
+        .slice(0, 3)
+        .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
     }
 
     // FEED LANDMARK PAIRS (the doc's zero-cost add): the feed's own
@@ -908,7 +904,12 @@ export class LandmarkService {
         if (found.length >= 3) break;
         if (d.lat == null || d.lon == null) continue; // never claim coords for an unvalidated anchor
         if (found.some(f => f.name.toLowerCase() === d.name.toLowerCase())) continue;
-        found.push({ name: d.name, distance_m: 0, lat: d.lat, lon: d.lon, place_url: d.place_url, place_id: undefined });
+        // The chain anchors pass the same ring test as everything else — an
+        // anchor named in the description is not "во близина" just because
+        // the copy mentioned it.
+        const dM = Math.round(_distM(center.lat, center.lon, d.lat, d.lon));
+        if (dM > FEED_LANDMARK_MAX_M) continue;
+        found.push({ name: d.name, distance_m: dM, lat: d.lat, lon: d.lon, place_url: d.place_url, place_id: undefined });
       }
     }
 
@@ -924,7 +925,7 @@ export class LandmarkService {
         ).run(p.id, 'no_landmark', new Date().toISOString());
       } catch {}
       try { dbgLog(
-        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-EMPTY no POIs within 500m → queue\n`); } catch {}
+        `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-EMPTY no POIs within ${FEED_LANDMARK_MAX_M}m → queue\n`); } catch {}
     }
 
     return found.map(f => ({ landmark: f.name, lat: f.lat, lon: f.lon, place_url: f.place_url, place_id: f.place_id }));
