@@ -65,12 +65,9 @@ test('a NAMED residential complex survives the junk filter (Beverly Hills class)
   store.close();
 });
 
-test('NEAR BAND wins: a place at 50m outranks a mall at 200m (the EB 94 fix)', () => {
+test('nearest eligible place wins: a place at 50m outranks a mall at 200m', () => {
   const dbPath = tmpDb();
-  // The 22:17 transcript: EB 94 sits next to a supermarket 53m away and the
-  // rotation served a named bus stop 145m away, because typeRank sorted BEFORE
-  // distance. Within the 75m band distance now wins — the honest answer for a
-  // landmark the client can see from the door.
+  // Distance leads throughout the eligible pool, not only inside a special band.
   writeMap(dbPath, [
     { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },   // ~50m
     { name: 'Рамстор Мол', type: 'mall', lat: 41.9987, lon: 21.4308 }, // ~200m
@@ -83,18 +80,61 @@ test('NEAR BAND wins: a place at 50m outranks a mall at 200m (the EB 94 fix)', (
   store.close();
 });
 
-test('OUTSIDE the near band typeRank still decides (preference before distance)', () => {
+test('nearest eligible place wins outside the former near band', () => {
   const dbPath = tmpDb();
-  // Both beyond 75m: the mall must win again, or the band would have turned
-  // the ladder into plain nearest-first.
   writeMap(dbPath, [
-    { name: 'Кафе Далеку', type: 'cafe', lat: 41.99800, lon: 21.4302 }, // ~111m, rank 1
-    { name: 'Рамстор Мол', type: 'mall', lat: 41.99870, lon: 21.4308 }, // ~196m, rank 5
+    { name: 'Кафе Далеку', type: 'cafe', lat: 41.99800, lon: 21.4302 }, // ~111m
+    { name: 'Рамстор Мол', type: 'mall', lat: 41.99870, lon: 21.4308 }, // ~196m
   ], []);
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.99700, 21.4302, 500, 10);
-  assert.equal(pois[0].name, 'Рамстор Мол', 'outside the band typeRank decides');
-  assert.equal(pois[1].name, 'Кафе Далеку');
+  assert.equal(pois[0].name, 'Кафе Далеку', 'the nearer eligible public place leads');
+  assert.equal(pois[1].name, 'Рамстор Мол');
+  store.close();
+});
+
+test('EB 76 regression: a 76m embassy beats a popular 274m mall', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Амбасада на Црна Гора', type: 'embassy', lat: 41.99600, lon: 21.43113, review_count: 7 }, // ~76m
+    { name: 'Беверли Хилс', type: 'mall', lat: 41.99600, lon: 21.43355, review_count: 1551 }, // ~274m
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99600, 21.43020, 500, 10);
+  assert.equal(pois[0].name, 'Амбасада на Црна Гора');
+  assert.equal(pois[1].name, 'Беверли Хилс');
+  store.close();
+});
+
+test('popularity breaks only close-distance ties', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Помалку познато место', type: 'embassy', lat: 41.99600, lon: 21.43142, review_count: 7 }, // ~100m
+    { name: 'Популарен мол', type: 'mall', lat: 41.99600, lon: 21.43191, review_count: 1500 }, // ~140m
+    { name: 'Најпопуларно подалеку', type: 'mall', lat: 41.99600, lon: 21.43312, review_count: 50000 }, // ~240m
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99600, 21.43020, 500, 10);
+  assert.equal(pois[0].name, 'Популарен мол', '40m close tie may favor the better-known place');
+  assert.equal(pois[1].name, 'Помалку познато место');
+  assert.equal(pois[2].name, 'Најпопуларно подалеку', 'a place outside the 50m tie group cannot jump ahead');
+  store.close();
+});
+
+test('candidate cap is chosen by distance before popularity ranking', () => {
+  const dbPath = tmpDb();
+  const pois = Array.from({ length: 30 }, (_, i) => ({
+    name: `Независимо Место ${String(i).padStart(2, '0')}`,
+    type: 'mall',
+    lat: 41.99600,
+    lon: 21.43020 + (i + 1) * 0.00010,
+    review_count: i === 5 ? 50000 : 5,
+  }));
+  writeMap(dbPath, pois, []);
+  const store = new OfflineMapStore(dbPath);
+  const selected = store.nearestPois(41.99600, 21.43020, 500, 5).map(p => p.name);
+  const nearestFive = pois.slice(0, 5).map(p => p.name);
+  assert.deepEqual(new Set(selected), new Set(nearestFive), 'a highly reviewed sixth POI cannot displace any of the five closest candidates');
   store.close();
 });
 
@@ -114,14 +154,12 @@ test('capitalized Google types rank identically to lowercase OSM types', () => {
   store.close();
 });
 
-test('a PARK outranks a closer bus stop named after it (EB 89 / Парк Авионче)', () => {
+test('a named bus stop is a secondary fallback to the actual nearby place', () => {
   // The live 2026-10-11 case. Бул. АСНОМ 134 (Аеродром) has five bus stops
   // inside 250m — one of them literally called "Парк Аеродром" and only 95m
   // away — plus the park the neighbourhood is actually known by, „Парк
-  // Авионче“ with the plane monument, 180m across the boulevard. With transit
-  // ranked ABOVE parks the reply named the bus stop and the client hears the
-  // park: they walk to the wrong place, because the stop and the park are not
-  // the same spot. The park is the place; the stop is only named after it.
+  // A stop sharing the park's name is not the park itself, so valid places
+  // precede transit references; the stop remains available as a fallback.
   const dbPath = tmpDb();
   writeMap(dbPath, [
     { name: 'Парк Аеродром', type: 'bus_station', lat: 41.98840, lon: 21.47652 },          // ~95m, rank 3

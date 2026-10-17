@@ -27,6 +27,9 @@ import { normType, typeRank } from './types';
  *  Кисела Вода, Влае, Ѓорче Петров, Чаир, Бутел, Гази Баба. */
 export const SKOPJE_BBOX: [number, number, number, number] = [41.95, 21.25, 42.10, 21.55];
 
+/** Increment when landmark eligibility, distance, or tie-breaking policy changes. */
+export const LANDMARK_RANKING_POLICY_VERSION = 2;
+
 /** Public Overpass mirrors — the build tries them in order (they are flaky —
  *  that is exactly why we go offline). */
 const OVERPASS_MIRRORS = [
@@ -792,47 +795,44 @@ export class OfflineMapStore {
       !JUNK_TYPES.has(normType(r.type)) ||
       (normType(r.type) === 'residential' && !!r.name && r.name.trim().length > 0));
 
-    // THE RANKING LADDER (the doc's recommendation, implemented):
-    //   1. typeRank — institutional anchor first (a mall at 200m outranks a
-    //      cafe at 50m; people say "кај Рамстор", never "кај кафето")
-    //   2. prominence — log10(review_count+1): within a tier, the famous
-    //      place wins over the quiet one regardless of small distance gaps
-    //   3. distance — the final tie-break
-    // Permanently-closed places sink below everything in their tier (their
-    // prominence is forced negative); Google rows get a hair of prominence
-    // so the OSM/Google same-tier tie goes to the verified anchor.
+    // STEP 3 — distance chooses the first eligible public location. Transit
+    // stops are secondary references (they can share a name with the place
+    // they serve), so keep them as fallbacks after actual places.
+    const TRANSIT_TYPES = new Set([
+      'bus_station', 'bus_stop', 'bus station', 'bus stop',
+      'tram_station', 'tram_stop', 'tram station', 'tram stop',
+    ]);
+    const secondaryTransit = (type: string): number => TRANSIT_TYPES.has(normType(type)) ? 1 : 0;
+
+    // STEP 4 — prominence may decide only within a fixed, 50m distance group.
+    // Groups are anchored at their nearest member to avoid a non-transitive
+    // pairwise comparator (A~B and B~C must not let C jump ahead of A).
+    const DISTANCE_TIE_BAND_M = 50;
     const prominence = (r: { review_count?: number | null; closed?: number | null; source?: string }): number => {
       if (r.closed === 1) return -1;
       const base = Math.log10((r.review_count ?? 0) + 1);
       return r.source === 'google' ? base + 0.01 : base;
     };
-    // PROXIMITY OVERRIDE (the EB 94 lesson). Distance used to be the LAST
-    // key, so a named bus stop 145m away won over the supermarket 53m away and
-    // the client was told "во близина на ШАМПИОНЧЕ-КОН ЦЕНТАР" for a property
-    // whose nearest public place is Рептил. A place WITHIN THE NEAR BAND
-    // (75m) now outranks everything farther regardless of type — a landmark
-    // you can see from the door is the honest answer. `typeRank >= 1` keeps
-    // unusable rows (unknown types, bare "yes" buildings) out of the override
-    // so a kiosk can never hijack the first slot.
-    const NEAR_OVERRIDE_M = 75;
-    // …BUT A TRANSIT STOP NEVER TAKES THE BAND (2026-10-11, Бул. АСНОМ 134).
-    // A stop is NAMED AFTER the place it serves: „Парк Аеродром“ is a bus stop
-    // ~52m from the door while the park the client asked about (Парк Авионче,
-    // with the plane monument) is 180m across the boulevard. Boosting the stop
-    // made the reply say "во близина на Парк Аеродром" — the client hears the
-    // PARK and walks to a bus stop. Stops still rank (and are still served),
-    // they just cannot outrank the real place within a tier. The override keeps
-    // doing its job for places at the door: Рептил (supermarket, 53m) still
-    // beats the famous landmark 200m away.
-    const TRANSIT_TYPES = new Set(['bus_station', 'bus_stop', 'tram_station', 'tram_stop']);
-    const nearBand = (r: { dist: number; type: string }): number =>
-      r.dist <= NEAR_OVERRIDE_M && typeRank(r.type) >= 1 && !TRANSIT_TYPES.has(normType(r.type)) ? 0 : 1;
-    const ranked = clean.sort((a, b) =>
-      (nearBand(a) - nearBand(b))
-      || (typeRank(b.type) - typeRank(a.type))
-      || (prominence(b) - prominence(a))
-      || (a.dist - b.dist));
-
+    const rankByProximity = <T extends { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string }>(items: T[]): T[] => {
+      const out: T[] = [];
+      for (const transitGroup of [0, 1]) {
+        const candidates = items
+          .filter(p => secondaryTransit(p.type) === transitGroup)
+          .sort((a, b) => a.dist - b.dist || a.name.localeCompare(b.name));
+        for (let start = 0; start < candidates.length;) {
+          let end = start + 1;
+          while (end < candidates.length && candidates[end].dist - candidates[start].dist <= DISTANCE_TIE_BAND_M) end++;
+          const close = candidates.slice(start, end).sort((a, b) =>
+            (prominence(b) - prominence(a))
+            || (a.dist - b.dist)
+            || (typeRank(b.type) - typeRank(a.type))
+            || a.name.localeCompare(b.name));
+          out.push(...close);
+          start = end;
+        }
+      }
+      return out;
+    };
     // SAME-PLACE COLLAPSE — the ONE bilingual identity rule (samePlacePoi),
     // shared with the map build (scripts/identity-heal.ts), so the request
     // path can never disagree with what the build merged:
@@ -846,7 +846,9 @@ export class OfflineMapStore {
     // no longer occupy two rotation slots ("Embassy of Montenegro" + ?cid,
     // then "Амбасада на Црна Гора" + ?q — one building, twice).
     const merged: MergedPoi[] = [];
-    for (const poi of ranked) {
+    const byDistance = (a: { dist: number; name: string }, b: { dist: number; name: string }): number =>
+      a.dist - b.dist || a.name.localeCompare(b.name);
+    for (const poi of clean.sort(byDistance)) {
       const dupIdx = merged.findIndex(g => samePlacePoi(g, poi).same);
       if (dupIdx >= 0) {
         merged[dupIdx] = mergeSamePlace(merged[dupIdx], poi, lat, lon);
@@ -854,7 +856,17 @@ export class OfflineMapStore {
       }
       merged.push(poi);
     }
-    return merged.slice(0, limit).map(p => ({
+    // STEP 5 — choose the unique candidate pool by distance BEFORE popularity
+    // ranking. Ordinary places fill the cap first; transit stops fill unused
+    // slots only as fallbacks, so a dense stop cluster cannot crowd out a real
+    // public place. A verified Google identity may change merged coordinates,
+    // so this ordering uses the post-merge distances.
+    const primaryPool = merged.filter(p => secondaryTransit(p.type) === 0).sort(byDistance).slice(0, limit);
+    const transitPool = primaryPool.length < limit
+      ? merged.filter(p => secondaryTransit(p.type) === 1).sort(byDistance).slice(0, limit - primaryPool.length)
+      : [];
+    const candidates = [...primaryPool, ...transitPool];
+    return rankByProximity(candidates).map(p => ({
       name: p.name,
       type: p.type,
       distance_m: Math.round(p.dist),

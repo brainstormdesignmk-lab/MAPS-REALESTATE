@@ -65,7 +65,7 @@ test('name variants are NOT deduped (Kipper vs Kipper Market - Butel = different
   store.close();
 });
 
-test('nearest POIs capped at limit, preference-ranked', () => {
+test('nearest POIs are capped at the limit and distance-ranked', () => {
   const dbPath = tmpDb();
   writeMap(dbPath, [
     { name: 'Кафе Миро', type: 'cafe', lat: 41.9970, lon: 21.4300 },           // ~50m, rank 1
@@ -76,12 +76,9 @@ test('nearest POIs capped at limit, preference-ranked', () => {
   const store = new OfflineMapStore(dbPath);
   const pois = store.nearestPois(41.9966, 21.4302, 500, 3);
   assert.equal(pois.length, 3, 'capped at limit=3');
-  // Ladder (2026-10): the NEAR BAND (≤75m) wins first — a place you can see
-  // from the door beats a famous one 200m away — then typeRank, then distance.
-  assert.equal(pois[0].name, 'Кафе Миро', 'the 47m cafe outranks the 238m mall');
-  assert.equal(pois[1].name, 'Рамстор Мол');
-  // …and a PARK (rank 4, the 150m Градски) now beats the 130m pharmacy (3):
-  // "спроти паркот" locates a building better than "кај аптеката" (2026-10-11).
+  // Distance drives the list: 47m cafe, 130m pharmacy, then 150m park.
+  assert.equal(pois[0].name, 'Кафе Миро');
+  assert.equal(pois[1].name, 'Аптека 24');
   assert.equal(pois[2].name, 'Парк Градски');
   store.close();
 });
