@@ -475,6 +475,34 @@ function publicPlace(l: Landmark | undefined): Landmark | undefined {
  *  is answered from the whole city map — see the handler's distance lane. */
 export const FEED_LANDMARK_MAX_M = 200;
 
+/** The FIRST entry carries a stronger contract than the rest of the list:
+ *  it is the one name a client actually hears ("во близина на X"), so it must
+ *  be both MEASURABLE (a real distance inside FEED_LANDMARK_MAX_M) and
+ *  RECOGNIZABLE (a type the map engine ranks). An unranked type is exactly how
+ *  EB 94's Студентски дом Пелагонија fell out of its own landmark list —
+ *  `dormitory` was missing from LANDMARK_PREFERENCE, scored 0, and a 257 m
+ *  shopping mall took the first slot.
+ *
+ *  Returns a human-readable reason, or undefined when the first entry is
+ *  compliant. An EMPTY list is not a violation: a property the map cannot
+ *  honestly place carries no claim at all (the callers say so explicitly). */
+export function firstLandmarkProblem(list: FeedLandmark[] | undefined): string | undefined {
+  const first = list?.[0];
+  if (!first) return undefined;  // no claim → nothing to verify
+  const name = stripPoiAnnotation(first.landmark ?? '') || '(без име)';
+  const d = first.distance_m;
+  if (typeof d !== 'number' || !Number.isFinite(d)) {
+    return `„${name}“ нема измерено растојание — не може да се тврди „во близина“`;
+  }
+  if (d > FEED_LANDMARK_MAX_M) {
+    return `„${name}“ е на ${Math.round(d)} м — над дозволените ${FEED_LANDMARK_MAX_M} м`;
+  }
+  if (typeRank(first.type ?? '') === 0) {
+    return `„${name}“ е од непрепознатлив тип „${first.type ?? '(празно)'}“ — не е јавен ориентир`;
+  }
+  return undefined;
+}
+
 /** Strip OUR OWN list annotation from an LLM answer.
  *
  *  The pick prompt hands the model lines like

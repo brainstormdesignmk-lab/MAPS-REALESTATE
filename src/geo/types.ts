@@ -25,6 +25,16 @@ export const LANDMARK_PREFERENCE: Record<string, number> = {
   // rank-aware paths treat Македонија square as an unknown shop.
   square: 5, plaza: 5,
   mall: 5, school: 4, university: 4, hospital: 4, clinic: 4,
+  // Dormitories are BLOCK-level anchors: a student campus is a big public
+  // building people navigate by ("кај Студентскиот дом Пелагонија"), and at
+  // EB 94 it is the one nearby place a client actually recognises. Left
+  // unranked (→ 0), that 63 m dorm lost to a 7 m supermarket AND to an
+  // unranked "Inn" with Google review prominence — rank sorts BEFORE distance
+  // here, so a missing type silently erased the most useful landmark. They sit
+  // at the mall/town-hall tier so a 250 m+ suburban mall cannot push a campus
+  // at the door out of the conversation. student_accommodation is the same
+  // institution under its OSM label (Студентски дом Стив Наумов).
+  dormitory: 5, student_accommodation: 5,
   police: 4, fire_station: 4,
   // Churches/cathedrals are the anchors people give directions by ("кај
   // Католичка црква"), yet they shared rank 3 with a pharmacy — inside the
@@ -67,6 +77,12 @@ const TYPE_ALIASES: Record<string, string> = {
   'shopping center complex': 'mall',
   'trade center': 'mall',
   'city district': 'subdistrict',
+  // OSM/Google name the small-guesthouse class "Inn"; unaliased it ranked 0
+  // and used its Google prominence to outrank real institutional anchors
+  // (EB 94: "Accommodation Ara" beat Студентски дом Пелагонија). It is a
+  // hotel-class place, so it ranks as one.
+  inn: 'hotel',
+  'boarding school': 'school',
 };
 export function typeRank(type: string | null | undefined): number {
   const t = normType(type);

@@ -27,8 +27,15 @@ import { normType, typeRank } from './types';
  *  Кисела Вода, Влае, Ѓорче Петров, Чаир, Бутел, Гази Баба. */
 export const SKOPJE_BBOX: [number, number, number, number] = [41.95, 21.25, 42.10, 21.55];
 
-/** Increment when landmark eligibility, distance, or tie-breaking policy changes. */
-export const LANDMARK_RANKING_POLICY_VERSION = 3;
+/** Increment when landmark eligibility, distance, or tie-breaking policy changes.
+ *
+ *  v4 — dormitories (and the OSM `student_accommodation` label) are ranked as
+ *  institutional anchors (4), and the "Inn" type is aliased to hotel (2).
+ *  Before this, a 63 m student dorm (EB 94, Пелагонија) scored rank 0 and was
+ *  pushed out of the top-25 pool by shops; the row could only ever name the
+ *  supermarket at the door. The bump makes every stored list stale so the feed
+ *  sweep re-ranks it instead of trusting the old order. */
+export const LANDMARK_RANKING_POLICY_VERSION = 4;
 
 /** Public Overpass mirrors — the build tries them in order (they are flaky —
  *  that is exactly why we go offline). */
