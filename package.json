@@ -22,6 +22,7 @@
     "suspect-pairs": "tsx scripts/suspect-pairs.ts",
     "dedupe-suspects": "tsx scripts/dedupe-suspects.ts",
     "health": "tsx scripts/healthcheck.ts",
+    "audit:public": "tsx scripts/audit-public-landmarks.ts",
     "backfill": "tsx scripts/backfill-geo.ts",
     "place-urls": "tsx scripts/capture-place-urls.ts",
     "cron:check": "tsx scripts/install-cron.ts --check",

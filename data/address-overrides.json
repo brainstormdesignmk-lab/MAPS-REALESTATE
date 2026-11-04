@@ -67,6 +67,13 @@
       "lat": 41.98311,
       "lon": 21.48017,
       "note": "EB 87 — school at Бул. Февруарски Поход 95 (Аеродром); present in OSM as way 179481461 but missed by our import"
+    },
+    {
+      "name": "Клинички центар",
+      "type": "hospital",
+      "lat": 41.9888038,
+      "lon": 21.4220051,
+      "note": "[18:56] 'STANCE ZA PRODAVANJE KAJ DRZAVNA BOLNICA' — the УКЦ „Мајка Тереза“ complex (OSM way 32687572, bbox 41.9866-41.9907 / 21.4177-21.4269) that Skopjani call државна болница. The import kept its 20 individual clinics (Клиника за Кардиологија …) but DROPPED the complex itself, so the one place everybody navigates by had no row and the funnel asked the client for a location he had just named."
     }
   ],
   "addresses": [

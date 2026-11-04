@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { normType, LANDMARK_PREFERENCE, typeRank } from '../src/geo/types';
+import { canonicalType, normType, LANDMARK_PREFERENCE, typeRank } from '../src/geo/types';
 import { OfflineMapStore, writeMap } from '../src/geo/offlineMap';
 
 function tmpDb(): string {
@@ -31,6 +31,55 @@ test('LANDMARK_PREFERENCE has the canonical keys', () => {
   assert.equal(typeRank(' MALL '), typeRank('mall'));
   assert.equal(typeRank('Pharmacy'), typeRank('pharmacy'));
   assert.equal(typeRank('garbage_type'), 0);
+});
+
+test('the public-place ladder: schools, markets, cinemas, hospitals lead — and every place still serves', () => {
+  // OWNER RULE (2026-10-29): schools, universities, markets, student
+  // dormitories, theatres, cinemas, hospitals and the rest of the big PUBLIC
+  // buildings are the landmarks a client means. All places stay candidates for
+  // a search anchor — the ladder only decides their PRIORITY.
+  assert.equal(typeRank('Elementary school'), typeRank('school'));
+  assert.equal(typeRank('High school'), typeRank('school'));
+  assert.equal(typeRank('college'), typeRank('university'));
+  assert.equal(typeRank('General hospital'), typeRank('hospital'));
+  assert.equal(typeRank('Movie theater'), typeRank('cinema'));
+  assert.equal(typeRank('Market'), typeRank('market'));
+  assert.equal(typeRank('marketplace'), typeRank('market'));
+  assert.ok(typeRank('market') > typeRank('bank'), 'a market leads a bank');
+  assert.ok(typeRank('cinema') >= typeRank('school'), 'a cinema is a public anchor');
+  assert.ok(typeRank('theatre') > typeRank('cafe'), 'a theatre leads a cafe');
+  assert.ok(typeRank('dormitory') > typeRank('pharmacy'), 'a dormitory leads a pharmacy');
+  // …and the rest of the big PUBLIC buildings, under either Google or OSM name.
+  assert.equal(typeRank('Tourist attraction'), typeRank('attraction'));
+  assert.equal(typeRank('Historical landmark'), typeRank('attraction'));
+  assert.equal(typeRank('Cultural center'), typeRank('cultural_center'));
+  assert.equal(typeRank('community centre'), typeRank('community_centre'));
+  assert.equal(typeRank('Post office'), typeRank('post_office'));
+  assert.equal(typeRank('Outlet mall'), typeRank('mall'));
+  assert.equal(typeRank('Nursery school'), typeRank('kindergarten'));
+  assert.equal(typeRank('International school'), typeRank('school'));
+  assert.ok(typeRank('courthouse') > typeRank('bank'), 'a courthouse leads a bank');
+  assert.ok(typeRank('attraction') > typeRank('bank'), 'a visited landmark leads a bank');
+  assert.ok(typeRank('post_office') > typeRank('cafe'), 'the post office still leads a cafe');
+  assert.equal(typeRank('Discount supermarket'), typeRank('supermarket'));
+  // OSM compound types take the best of their listed classes.
+  assert.equal(typeRank('marketplace;fire_station'), typeRank('market'));
+  // The audit's class lookup goes through the same alias table.
+  assert.equal(canonicalType('Movie theater'), 'cinema');
+  assert.equal(canonicalType(' Cultural centre '), 'cultural_center');
+  // …and the small business is still a place, just last in line.
+  assert.ok(typeRank('travel_agency') < typeRank('mall'));
+
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Бисер Травел', type: 'travel_agency', lat: 41.99700, lon: 21.43000 }, // ~40m
+    { name: 'ТЦ Бисер', type: 'Shopping mall', lat: 41.99600, lon: 21.43160 },     // ~170m
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(41.99670, 21.43000, 250, 10);
+  assert.equal(pois[0].name, 'ТЦ Бисер', 'the mall leads the travel agency');
+  assert.equal(pois[1].name, 'Бисер Травел', 'the agency is still served — priority, not exclusion');
+  store.close();
 });
 
 test('junk types never appear in nearestPois output', () => {

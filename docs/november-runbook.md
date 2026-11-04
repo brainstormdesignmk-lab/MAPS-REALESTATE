@@ -352,6 +352,208 @@ collect habit: a snapshot with nothing new prints `+0 row(s)`.
 
 ---
 
+## 7b. THE PROPERTY SWEEP — MUST EXECUTE: repair every center, rebuild every roster, audit every public landmark on the TOTAL map (0–10 searches)
+
+**MANDATORY — not a proposal, and not skippable.** The November artifact is
+NOT shippable until R0–R6 have all exited 0: checklist items 19–23 are required
+checkboxes, the same class as items 13–14. A §5 run that ends green but skipped
+§7b has produced a map nobody may ship (exit 1 until the sweep completes).
+
+**Scope: ALL feed properties, not the current snapshot.** 44 rows today grow
+with the feed; every future property inherits this policy from the code change
+in R1 — the sweep itself heals the present portfolio once. This is why it must
+wait for November: §5's SERP sweep closes the grid, and **Phase B harvests every
+formatted address into `learnAddress`** — the total map is the first map with
+enough exact street anchors to repair centers OFFLINE, without spending geocodes.
+The same total map is what makes **R5's public-place audit** meaningful: every
+school, market, dormitory, theatre, cinema and hospital the sweep captured is
+finally present, so the priority ladder is proven on the finished map instead of
+passing vacuously on October's partial grid.
+Runs **MUST order: after** §6 VERIFY passed and **after** §7's queue import,
+**before** §8's first ship, so the map file and the Supabase rosters/centers
+move together. No step may be executed out of order.
+
+**Ground truth established by the 2026-10-23 dry-run** (`tmp/dryrun-global-fix.ts`,
+read-only, 0 searches): 16/44 live rows are `osm_low_confidence`; 14 of 44 rosters
+are measured from a low-confidence center (the roster path skips the honesty gate
+the live scan enforces); **123/123 landmark links in the whole feed are bare
+`?q=` coordinate pins** (no `cid`); the physical business (EB 46, Кисела Вода)
+serves **Бутел** landmarks ~4 km away — its center geocoded into the wrong
+neighborhood. The stages below remove that entire defect class.
+
+### R0. Pre-flight (no spend) — REQUIRED, aborts block the whole run
+
+```bash
+# 0a. EB 57's manual override (data says bare „Ѓуро Стругар" with no number;
+#     the OSM street anchor sits ~76 m from the operator-verified pin).
+#     Add the VERIFIED coordinate to data/address-overrides.json first,
+#     then:  npx tsx scripts/apply_overrides.ts
+#
+# 0b. Diff report FIRST — re-census at run time, never trust October's numbers:
+#     (map repo) reads the LIVE feed, reports repair candidates, gate blast
+#     radius, projected L1–L3 per property, and the place-card census.
+npx tsx tmp/dryrun-global-fix.ts 2>&1 | tee data/logs/nov-property-dryrun.log
+#     REVIEW before any write — a HARD GATE: no write may happen without a
+#     reviewed dry-run print in this log. Abort criteria:
+#     - any "repaired" center whose offline candidate has no exact housenumber
+#       AND moves > 50 m (street-ambiguous rows stay low-conf + honest fallback)
+#     - any projected L1 that a human would call wrong (same bar as §6)
+```
+
+### R1. The roster trust gate + one ranking rule (code, 0 searches)
+
+In the geo engine (shipped to every reader by `npm run build`):
+
+1. `feedRosterSlots()` must measure claims against a **trusted center**
+   (`centerTrusted()`), same gate `nearestPois()` already enforces. A roster
+   entry whose re-measured distance exceeds `FEED_LANDMARK_MAX_M` from the
+   CURRENT trusted center is dropped, not trusted because import said so.
+2. Roster **generation** refuses a low-confidence center — that is how EB 46
+   ever got a Бутел roster. The row queues for a real geocode instead and the
+   reader serves the honest neighborhood line (the no-address protocol).
+3. Roster order switches from import-order to the SAME significance-first rule
+   the scan uses: `typeRank`, then distance, then Google prominence — one
+   ranking rule, every call site.
+4. **Bump `LANDMARK_RANKING_POLICY_VERSION`** — the existing convergence guard
+   (`feedListCurrent`) then regenerates every stored roster the next time any
+   resolver touches it; nothing relies on hope.
+
+Verify in the BOT repo (`real-estate-atoms/secretaries/inbound_final`):
+`npm run tests:compiled`-equivalent sweep over landmark suites
+(`landmark-tiers`, `nearby-landmarks`, `landmark-ladder`, `location-ladder`,
+`whereis-*`, `eb57-e2e`, `place-identity`, `type-normalize`).
+
+### R2. Center repair for ALL properties (offline-first; 0 searches, then ≤ 5)
+
+```bash
+# Offline pass — exact street+housenumber rows from the finished map's
+# addresses table (~7.7k rows now; more after Phase B's learnAddress harvest):
+npx tsx tmp/dryrun-global-fix.ts --repair --write    # heals a COPY unless --write
+# Auto-accept only ≤ 50 m moves, exact-number rows first; everything else is
+# printed for review, never silently moved.
+```
+
+Leftovers (street not in map, phrase addresses like „КАЈ КАТОЛИЧКА", no number):
+queue to `geo_reresolve_queue` with reason `no_offline_candidate` — Phase C's
+budget-guarded SerpApi drain is the only thing that may touch them, and the
+pass logs each search. Cap: 5 searches; if the leftovers need more, they ship
+as honest-fallback rows and WAIT for December — do not burn the key at the end
+of the month.
+
+### R3. Rebuild every roster on the repaired map, ALL properties (0 searches)
+
+The bot-side writer is the guarded resolver
+(`real-estate-atoms/secretaries/inbound_final`):
+
+```bash
+HERMES_UPDATES=1 npx tsx src/scripts/hermesLandmarks.ts            # dry: prints the diff
+HERMES_UPDATES=1 npx tsx src/scripts/hermesLandmarks.ts --feed     # writes via update-property-landmarks
+```
+
+Every desired list now comes from the ONE significance-first rule over the
+TOTAL map: `Мин. социјална политика (23 m) → Плоштад ВМРО (26 m) → …` for EB 57
+instead of a ministry pin measured from a wrong anchor. The reader keeps its
+three-slot rotation and privacy ladder — only the CONTENT and ORDER change.
+
+### R4. Place-card links where a verified place exists (0 searches)
+
+Census on the current map: **45/123** roster entries resolve to a
+Google-identified row — those entries now carry `place_id`/`place_url` and
+`landmarkLink()` emits `?cid=` links that open the **named place card**. The
+rest keep the bare coordinate pin **on purpose**: §13 already documents that
+`place_url` needs headless Chrome (out of scope), and the operator's rule
+stands — *a card link that cannot render a pin is worse than a pin*. Re-census
+is printed by the dry run; the November grid usually ADDS Google rows, so the
+45 will only grow.
+
+### R5. THE PUBLIC-PLACE PRIORITY AUDIT — on the FINISHED map, when every property exists (0 searches)
+
+**The owner's rule (2026-10-29):** schools, universities, markets, student
+dormitories, theatres, cinemas, hospitals and every other big PUBLIC building are
+the landmarks a client means — and **no place is removed**: every map row stays a
+search candidate, the ladder only decides its PRIORITY. That rule lives in
+`typeRank()` / `LANDMARK_PREFERENCE` (`src/geo/types.ts`) and every reply path
+reads it, so this stage proves it on the artifact rather than trusting the code.
+
+**Why it runs HERE, after §5 and after R2/R3 — not earlier.** Before the SERP
+sweep closes the grid, a class the grid has not reached yet is simply absent and
+the audit would pass vacuously. The sweep is also where NEW spellings arrive from
+Google/OSM (`Elementary school`, `High school`, `General hospital`,
+`Movie theater`, `Market`, `marketplace`, `outlet mall`, a semicolon compound
+like `marketplace;fire_station`). Unaliased, each one ranks **0** — i.e. below a
+bank — and silently erases a real institution from every answer. The finished map
+is the first map where all of them are present at once, and the rosters rebuilt
+in R3 are the first measured on the final ladder.
+
+```bash
+npm run audit:public       # read-only: 0 searches, no writes
+```
+
+Expect (numbers from the October map — November's are larger):
+
+```
+=== PUBLIC-PLACE PRIORITY AUDIT — data/skopje-pois.db ===
+map: 5992 rows · searches: 0 (read-only)
+
+LADDER — higher = stronger anchor (every row stays a candidate)
+  5  diplomatic · government · townhall · square · mall · dormitory · …
+  4  school · university · hospital · market · theatre · cinema · courthouse · attraction · …
+  3  bus_station · supermarket · pharmacy · kindergarten · museum · stadium · …
+  0  335 unclassified types (2471 rows)
+
+UNRANKED PUBLIC TYPES: none — every public class on this map ranks
+  (rank 0 on purpose — paid skills classes: language school, driving school, …)
+⚠ classes with no rows on this map (coverage gap, not a ranking defect): …
+ANCHOR REACHABILITY: 118/118 public rows served at their own pin
+
+=== PASS — every public place on this map ranks and serves ===
+```
+
+**Pass criteria:**
+
+| Check | Expected |
+|---|---|
+| exit code | **0** |
+| `UNRANKED PUBLIC TYPES` | **none** — any `✗` line is a public class ranking 0 |
+| `ANCHOR REACHABILITY` | **N/N** — every sampled public row comes back from `nearestPois()` at its own pin |
+| paid skills classes (`driving school`, `language school`, `dance/ballet/music/art school`) | reported at rank 0 **by design** — they are businesses, not anchors |
+| `⚠ classes with no rows` | a warning only: a map-coverage gap for December's grid, not a ranking defect and not a blocker |
+
+**If it fails:** add the reported spelling to `TYPE_ALIASES` in
+`src/geo/types.ts` (the file already carries the pattern, e.g.
+`'movie theater': 'cinema'`) — **never delete the row and never lower the
+class**. Then bump `LANDMARK_RANKING_POLICY_VERSION` (`src/geo/offlineMap.ts`,
+R1.4) so every stored feed roster regenerates on the new ladder, re-run R3's dry
+print, and re-run this audit. Only then is the map shippable.
+
+**Rollback:** none needed — this stage writes nothing. A failing verdict blocks
+§8's ship, exactly like a §6 failure.
+
+### R6. Verify + ship (feeds §8's steps, in this order)
+
+```bash
+# 1. Supabase payload matches the new policy:
+npm run verify:feed         # bot repo — read-only check of the LIVE payload
+# 2. Live answer must be landmark-correct (the §6 analog for the feed side):
+#    bot: "76" → landmark + PIN; "57" → Плоштад ВМРО-class answer, never a
+#    far ministry from a bad anchor.
+# 3. THEN the §8 map-file ship and §9 deployment — the sweep rides them.
+```
+
+**Rollback anchors:** `data/skopje-pois.db.pre-november` (§2c) is the map
+anchor; the feed anchor is `update-property-landmarks`' payload log plus the
+R3 diff print (cased before write) — both reversable without a second sweep.
+
+### What R0–R6 deliberately do NOT include (so "must execute" stays bounded)
+
+- **No schedule** — this is a one-off inside the November pass (§10's contract).
+- **No rating re-weighting** — §13's prominence rule stands; R1 only aligns the
+  roster to the SAME order the scan already served.
+- **No headless-Chrome `place_url` capture** — cid links close the gap where a
+  Google identity already exists; the rest stay coordinate pins by policy.
+
+---
+
 ## 8. SHIP IT — the bots only ever receive the file
 
 Ship **after** §6 passes, and never copy SQLite hot.
@@ -716,6 +918,11 @@ copy first, `--write` to mean it.
 [x] 16  §11.C  DONE 2026-10-15 — --rescan floor 1 ; both 0-pair doors exit 1 (verified free)
 [ ] 17  §11.D  suspect-pairs flags identity-blind twins (one pid, one pid-less, same coords)
 [x] 18  §11.E  DONE 2026-10-15 — importing refresh-monthly starts nothing; probes heal a copy only
+[ ] 19  §7b R0  EB 57 override verified + dry-run re-census reviewed (abort criteria §7b)
+[ ] 20  §7b R1  trust gate + significance-first + policy bump — bot landmark suites green
+[ ] 21  §7b R2/R3 offline center repairs ≤ 50 m accepted; roster diff reviewed before --feed
+[ ] 22  §7b R5  npm run audit:public → exit 0, UNRANKED PUBLIC TYPES: none, anchors N/N (finished map)
+[ ] 23  §7b R6  verify:feed green; EB 57 answers Плоштад ВМРО-class, then /tmp/skopje-pois.db.november
 ```
 
 **Expected totals for November:** ~510–520 searches (**~2.1 keys** of the 2,000

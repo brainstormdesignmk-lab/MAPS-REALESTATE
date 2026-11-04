@@ -12,7 +12,7 @@
 //
 // Usage: npx tsx scripts/apply_overrides.ts
 
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import Database from 'better-sqlite3';
 import { streetKey } from '../src/geo/offlineMap';
 
@@ -94,6 +94,28 @@ function main() {
       aliasAdded++; added++;
     }
     if (aliasAdded > 0) console.log(`+ alias "${al.street}" ← ${aliasAdded} rows from "${al.osmStreet}"`);
+  }
+
+  // --- Name-variant exceptions -------------------------------------------
+  // data/name-variants.json holds the pairs the place-name SOUND KEY cannot
+  // see (translations and irregulars — spelling variants need no table). The
+  // engine loads this table on open (OfflineMapStore → loadNameVariants), so
+  // it must be rewritten after EVERY rebuild, like the overrides above.
+  const variantsPath = 'data/name-variants.json';
+  if (existsSync(variantsPath)) {
+    const vf = JSON.parse(readFileSync(variantsPath, 'utf8')) as {
+      variants?: Array<{ from: string; to: string; reviewed?: boolean }>;
+    };
+    db.exec('CREATE TABLE IF NOT EXISTS name_variants (word TEXT PRIMARY KEY, canonical TEXT NOT NULL)');
+    db.prepare('DELETE FROM name_variants').run();
+    let applied = 0;
+    const ins = db.prepare('INSERT OR REPLACE INTO name_variants (word, canonical) VALUES (?, ?)');
+    for (const v of vf.variants ?? []) {
+      if (!v.reviewed || !v.from || !v.to) continue;
+      ins.run(v.from, v.to);
+      applied++;
+    }
+    console.log(`+ variants: ${applied} reviewed pair(s) loaded`);
   }
 
   console.log(`\nApplied: ${added} added, ${skipped} already present. Done.`);

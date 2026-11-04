@@ -35,7 +35,7 @@ function dbgLog(line: string): void {
 import fs from 'fs';
 import { Db } from '../store/db';
 import { FeedLandmark } from '../data/properties';
-import { OfflineMapStore, type Center } from './offlineMap';
+import { OfflineMapStore, isShopLevelPlace, type Center } from './offlineMap';
 export type { Center } from './offlineMap';
 
 export interface Landmark {
@@ -110,10 +110,8 @@ function feedRosterSlots(
   const near = hasCenter ? { lat: center.lat, lon: center.lon } : undefined;
   for (const e of p.landmarks ?? []) {
     if (out.length >= ROTATION_SLOTS) break;
-    const name = String(e?.landmark ?? '').trim();
+    let name = String(e?.landmark ?? '').trim();
     if (!name) continue;
-    const key = name.toLowerCase();
-    if (seen.has(key)) continue; // one place, one slot (the feed can carry a dupe)
     const pin = coordsFromMapsUrl(e?.maps_url);
     let lat = pin?.lat;
     let lon = pin?.lon;
@@ -127,6 +125,26 @@ function feedRosterSlots(
         place_id = poi.place_id;
       }
     }
+    // A SHOP IS NOT A PLACE (the owner's rule, the EB 53 capture): the roster
+    // led with «Butik Galion» — a boutique inside ТЦ Бисер — and the card told
+    // the client the flat was near a shopfront nobody navigates by. When the
+    // shop stands inside a complex, the COMPLEX takes the slot and its own
+    // distance is measured below; when it does not, the entry is dropped (the
+    // honest neighborhood line beats an unknown name).
+    if (isShopLevelPlace(name, e?.type)) {
+      const complex = lat != null && lon != null ? map?.enclosingComplex(lat, lon) : undefined;
+      if (!complex) {
+        try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" is a shop, not a landmark\n`); } catch {}
+        continue;
+      }
+      name = complex.name;
+      lat = complex.lat;
+      lon = complex.lon;
+      place_url = complex.place_url;
+      place_id = complex.place_id;
+    }
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue; // one place, one slot (the feed can carry a dupe)
     if (lat == null || lon == null) {
       try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" not pinnable (stale roster entry)\n`); } catch {}
       continue;
@@ -497,6 +515,9 @@ export function firstLandmarkProblem(list: FeedLandmark[] | undefined): string |
   if (d > FEED_LANDMARK_MAX_M) {
     return `„${name}“ е на ${Math.round(d)} м — над дозволените ${FEED_LANDMARK_MAX_M} м`;
   }
+  if (isShopLevelPlace(name, first.type)) {
+    return `„${name}“ е продавница, не јавен ориентир`;
+  }
   if (typeRank(first.type ?? '') === 0) {
     return `„${name}“ е од непрепознатлив тип „${first.type ?? '(празно)'}“ — не е јавен ориентир`;
   }
@@ -620,9 +641,29 @@ export class LandmarkService {
    *  nothing matches. When center is given, the NEAREST branch of a chain
    *  wins ("TTK Banka" near Капиштец = the Beverly Hills branch, not Ново
    *  Лисиче). */
-  findPlace(name: string, center?: { lat: number; lon: number }): { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined {
+  findPlace(name: string, center?: { lat: number; lon: number }): { name: string; lat: number; lon: number; type?: string; place_url?: string; place_id?: string } | undefined {
     if (!this.opts.offlineMap?.available) return undefined;
     return this.opts.offlineMap.findPoiByName(name, center);
+  }
+
+  /** MISS RECOVERY for a name the exact passes could not place: the same map,
+   *  one slipped letter allowed (OfflineMapStore.findPoiByNameLoose). Called
+   *  ONLY after the exact lookup already failed or was refused, so a typo can
+   *  never displace an exact hit. The caller still runs the name-coverage
+   *  guard on the result. */
+  findPlaceLoose(name: string, center?: { lat: number; lon: number }): { name: string; lat: number; lon: number; type?: string; place_url?: string; place_id?: string } | undefined {
+    if (!this.opts.offlineMap?.available) return undefined;
+    return this.opts.offlineMap.findPoiByNameLoose(name, center);
+  }
+
+  /** WHICH NEIGHBOURHOOD a point sits in — the map's own OSM suburb rows.
+   *  Answers „во која населба е ТЦ Лептокарија?“ and seeds the area a place
+   *  implies, so the funnel stops guessing a district from feed votes.
+   *  Undefined when the map has no quarter tagged nearby: the caller then says
+   *  it does not know instead of naming a district it never measured. */
+  areaAt(lat: number, lon: number, maxM = 2500): { name: string; distance_m: number } | undefined {
+    if (!this.opts.offlineMap?.available) return undefined;
+    try { return this.opts.offlineMap.areaAt(lat, lon, maxM); } catch { return undefined; }
   }
 
   /** A place word the CLIENT typed, resolved to a LOCAL anchor of a property —
@@ -644,18 +685,24 @@ export class LandmarkService {
   { name: string; lat: number; lon: number; distance_m: number; place_id?: string } | undefined {
     const map = this.opts.offlineMap;
     if (!map?.available || !center || !Number.isFinite(center.lat) || !Number.isFinite(center.lon)) return undefined;
-    let best: { name: string; lat: number; lon: number; distance_m: number; place_id?: string } | undefined;
+    // FIRST FORM THAT RESOLVES WINS — the forms are ordered by FIDELITY (the
+    // client's own spelling, then the ч/ц twins, then the definite-stem), so a
+    // synthetic twin must never outrank the exact reading by happening to land
+    // nearer. The 2026-10-29 [01:29] capture: «трговски центар буњаковец»
+    // resolved the MALL under the exact spelling, while its ч twin matched only
+    // a BUS STOP of the same name — and "nearest across forms" chose the stop,
+    // so the side answer named the mall as both the side AND the farther place.
+    // The nearest BRANCH is still chosen, by findPoiByName itself (its center
+    // tie-break).
     for (const form of anchorWordForms(word)) {
       let hit: { name: string; lat: number; lon: number; place_url?: string; place_id?: string } | undefined;
       try { hit = map.findPoiByName(form, center); } catch { hit = undefined; }
       if (!hit || !Number.isFinite(hit.lat) || !Number.isFinite(hit.lon)) continue;
       const d = Math.round(_distM(center.lat, center.lon, hit.lat, hit.lon));
       if (d > maxM) continue;
-      if (!best || d < best.distance_m) {
-        best = { name: hit.name, lat: hit.lat, lon: hit.lon, distance_m: d, place_id: hit.place_id };
-      }
+      return { name: hit.name, lat: hit.lat, lon: hit.lon, distance_m: d, place_id: hit.place_id };
     }
-    return best;
+    return undefined;
   }
 
   /** Resolve the approximate location for a property. Cached in the DB after
@@ -692,9 +739,28 @@ export class LandmarkService {
         try {
           poi = this.opts.offlineMap?.available ? this.opts.offlineMap.findPoiByName(l.landmark) : undefined;
         } catch { poi = undefined; }
-        const pin = poi ? landmarkLink(l.landmark, poi.place_id ?? null, poi.lat, poi.lon) : '';
-        return { l, poi, hit: publicPlace({
-          landmark: l.landmark, type: l.type ?? 'place',
+        // A SHOP INSIDE A COMPLEX IS THE COMPLEX (the owner's EB 53 rule): the
+        // feed had «Butik Galion» typed «Shopping mall» 35 m out and it won the
+        // rotation, so the card claimed the flat sits near a boutique most
+        // people have never heard of — while ТЦ Бисер, the complex that
+        // boutique is inside, is the name from that neighbourhood. A shop with
+        // no complex around it carries no claim at all.
+        let name = l.landmark;
+        let entry = l;
+        if (isShopLevelPlace(name, l.type)) {
+          const complex = poi ? this.opts.offlineMap?.enclosingComplex(poi.lat, poi.lon) : undefined;
+          if (!complex) return { l, poi, hit: undefined as Landmark | undefined };
+          name = complex.name;
+          poi = { ...complex } as PoiHit;
+          // The substituted place's OWN distance replaces the shop's (the feed
+          // row said 35 m for the boutique; the complex is measured from the
+          // same property point), or the ranking would compare stale numbers.
+          const d = propGeo ? Math.round(_distM(propGeo.lat, propGeo.lon, complex.lat, complex.lon)) : l.distance_m;
+          entry = { ...l, landmark: name, distance_m: d };
+        }
+        const pin = poi ? landmarkLink(name, poi.place_id ?? null, poi.lat, poi.lon) : '';
+        return { l: entry, poi, hit: publicPlace({
+          landmark: name, type: l.type ?? 'place',
           mapsUrl: pin || l.maps_url, source: 'feed' as const,
         }) };
       })
@@ -723,8 +789,15 @@ export class LandmarkService {
           return (a.l.distance_m ?? Infinity) - (b.l.distance_m ?? Infinity);
         });
       if (ranked.length > 0) {
-        const top = ranked.slice(0, 3);
-        const _r = top[Math.abs(p.eb * 2654435761) % top.length].hit; dbgLog(
+        // THE FIRST NAME IS THE ONE THE CLIENT HEARS, so it is the TOP of this
+        // ranking — most significant, then nearest — never an EB-hash pick from
+        // the top three. The hash made the same flat say a different neighbour
+        // than its own rotation led with (EB 53: «Трговски центар Капитол» on
+        // the card while the map's nearest complex — ТЦ Бисер, 55 m — led the
+        // page), which is exactly the disagreement between chat and page the
+        // roster-first rule exists to prevent. Variety lives in the ROTATION
+        // (nearbyLandmarks), not in the first claim.
+        const _r = ranked[0].hit; dbgLog(
         `[${new Date().toISOString()}] EB ${p.eb}: RETURN-FEED ${_r.landmark} [${_r.source}]\n`); return _r;
       }
     }
@@ -798,6 +871,12 @@ export class LandmarkService {
           let pois = this.opts.offlineMap.nearestPois(geo.lat, geo.lon, 150, 25);
           if (pois.length === 0) pois = this.opts.offlineMap.nearestPois(geo.lat, geo.lon, 400, 25);
           if (pois.length === 0) pois = this.opts.offlineMap.nearestPois(geo.lat, geo.lon, 1000, 25);
+          // A SHOP IS NOT A LANDMARK (the owner's EB 53 rule): a boutique
+          // typed «Shopping mall» by Google used to win the mall tier by TYPE
+          // alone. Tenant rows are removed first, so the complex that holds
+          // them (ТЦ Бисер) is what the card names.
+          const anchors = pois.filter(po => !isShopLevelPlace(po.name, po.type));
+          if (anchors.length > 0) pois = anchors;
           // Three-tier landmark preference (canonical, typeRank-based):
           //   1. Malls — everyone knows "Беверли Хилс" / "ТЦ Бисер" / "Рамстор"
           //   2. Institutional anchors (schools, hospitals, universities, …)
@@ -917,6 +996,10 @@ export class LandmarkService {
     if (this.opts.offlineMap?.available) {
       found = this.opts.offlineMap.nearestPois(center.lat, center.lon, FEED_LANDMARK_MAX_M, 50)
         .filter(poi => poi.distance_m <= FEED_LANDMARK_MAX_M && poi.lat != null && poi.lon != null)
+        // A SHOP IS NOT A LANDMARK (the owner's EB 53 rule): the rotation never
+        // names a tenant — the complex it stands in is its own POI row and
+        // fills the slot honestly.
+        .filter(poi => !isShopLevelPlace(poi.name, poi.type))
         .slice(0, 3)
         .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
     }

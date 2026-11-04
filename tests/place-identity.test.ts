@@ -213,12 +213,30 @@ test('low-confidence feed row: the map building point is trusted and the PARK is
 });
 
 test('AUDIT: no two rotation entries in the live map are the same place', () => {
-  const db = path.join(process.cwd(), 'data', 'skopje-pois.db');
-  if (!fs.existsSync(db)) {
+  // WHICH MAP IS AUDITED (2026-10-28): this file is a LINK into the atom's tree
+  // (scripts/link-geo.js links the geo tests so the engine and its spec travel
+  // together), so `process.cwd()/data` is the ATOM's data dir — where a stale
+  // EMPTY skopje-pois.db made the audit assert against a file that is not the
+  // map. The candidates are tried in order and the first one that actually
+  // opens as a map wins; a missing artifact still skips the audit.
+  const candidates = [
+    process.env.SKOPJE_POIS_DB,
+    path.resolve(__dirname, '..', 'data', 'skopje-pois.db'),        // this repo
+    path.join(process.cwd(), 'data', 'skopje-pois.db'),              // cwd (maps root)
+    path.resolve(process.cwd(), '..', 'maps-realestate', 'data', 'skopje-pois.db'),               // atom layout
+    path.resolve(process.cwd(), '..', '..', '..', 'maps-realestate', 'data', 'skopje-pois.db'),   // workstation layout
+  ].filter((p): p is string => !!p && fs.existsSync(p));
+  let store: OfflineMapStore | undefined;
+  let db = '';
+  for (const candidate of candidates) {
+    const probe = new OfflineMapStore(candidate);
+    if (probe.available) { store = probe; db = candidate; break; }
+    probe.close();
+  }
+  if (!store) {
     // The map DB is a build artifact (not tracked) — nothing to audit.
     return;
   }
-  const store = new OfflineMapStore(db);
   assert.equal(store.available, true, `map must open: ${db}`);
   // Sample centres across the Skopje bbox: 0.01° ≈ 1.1km grid.
   const rows = [
