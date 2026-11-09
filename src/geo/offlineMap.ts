@@ -343,8 +343,13 @@ const EMBASSY_COUNTRY_EN: Record<string, string> = {
 // Михаило Апостолски» on the shared word «воена» — a different place 5 km
 // across town, named in a card the client never asked about.
 const LOCAL_PLACE_ALIASES: Array<[RegExp, string]> = [
+  // The target names the HOSPITAL row, never the bus stop of the same name:
+  // the map carries «Болница 8ми Септември» as a bus_station and «ГОБ 8-ми
+  // Септември» as the hospital itself 200 m away, and the old target string
+  // was a substring of the STOP only — so the funnel measured every card from
+  // a bus stop and named it as the place (the [23:34] capture).
   [/(?<![\p{L}\p{N}])(?:стара(?:та)?\s+)?(?:воена(?:та)?\s+болница|voena(?:ta)?\s+bolnica)(?![\p{L}\p{N}])/iu,
-    'Болница 8ми Септември'],
+    'ГОБ 8-ми Септември'],
   // «ДРЖАВНА БОЛНИЦА» IS the УКЦ „Мајка Тереза“ complex — the state clinical
   // centre on Бул. Водњанска 17, the one Skopjani name when they mean the
   // public hospital as opposed to Систина/Аџибадем. WHY an alias (the [18:56]
@@ -357,10 +362,27 @@ const LOCAL_PLACE_ALIASES: Array<[RegExp, string]> = [
   // listed because the Roman fold of „државна“ is „drzavna“ in either script
   // (ж and з both fold to z), so the extractor hands over «дрзавна» as often
   // as it hands over «државна».
-  [/(?<![\p{L}\p{N}])(?:државна(?:та)?|дрзавна(?:та)?)\s+болниц(?:а|ата|и|у)(?![\p{L}\p{N}])/iu,
+  // THE HOSPITAL WORD IS OPTIONAL (the [04:47] capture): the client wrote
+  // «TUKA KAJ DRZAVNA BLISKU» / «KAJ DRZAVNA», the bare adjective Skopjani use
+  // for the complex, and the alias demanded «болница» — so the lookup fell
+  // through to the substring pass and answered with «Reptil Market br.11
+  // Drzavna bolnica» (a pet shop NAMED AFTER the hospital, the only row in the
+  // map carrying the word), anchoring a whole search on a shop. The adjective
+  // alone is the place in this feed's vocabulary.
+  [/(?<![\p{L}\p{N}])(?:државна(?:та)?|дрзавна(?:та)?)(?:\s+болниц(?:а|ата|и|у))?(?![\p{L}\p{N}])/iu,
     'Клинички центар'],
-  [/(?<![\p{L}\p{N}])drzavna(?:ta)?\s+bolnic(?:a|i|u)(?![\p{L}\p{N}])/iu,
+  [/(?<![\p{L}\p{N}])drzavna(?:ta)?(?:\s+bolnic(?:a|i|u))?(?![\p{L}\p{N}])/iu,
     'Клинички центар'],
+  // «ГРАДСКА» ALONE IS «ГРАДСКА БОЛНИЦА» (the [20:30] capture) — the same class
+  // as «државна»: the adjective is what Skopjani call the city hospital. Asked
+  // bare, the map's closest row for the word was «Градска кафеана „Идадија“»,
+  // a kafana, so «КОЛКУ ИМА ОД ГРАДСКА ДО СТАНОТ?» measured the flat to a
+  // restaurant (and, when the flat's own word was misread as the place, to a
+  // kindergarten 2,4 km away). A POI-type noun after the adjective keeps its
+  // own row — «Градска кафеана», «Градска библиотека» are places in their own
+  // right, and the negative lookahead is what keeps them out of this alias.
+  [/(?<![\p{L}\p{N}])(?:градска(?:та)?|gradska(?:ta)?)(?:\s+(?:болниц(?:а|ата|и|у)|bolnic(?:a|ata|i|u)))?(?!\s*(?:кафеан|кафан|меан|пивниц|библиотек|книжар|аптек|управа|општин|галериј|сцена|плажа|базен|стадион)\p{L})(?![\p{L}\p{N}])/iu,
+    'Градска болница'],
   // «ЕКОНОМСКОТО УЧИЛИШТЕ» IS СЕПУГС „Васил Антевски – Дрен“ — the city's
   // Средно економско-правно училиште, in Кисела Вода. WHY an alias (the [11:28]
   // capture «NA KOLKAVO RASTOJANIE SE DO EKONOMSKOTO ?» after two Кисела Вода
@@ -376,6 +398,18 @@ const LOCAL_PLACE_ALIASES: Array<[RegExp, string]> = [
   [/(?<![\p{L}\p{N}])(?:економско(?:то)?|ekonomsko(?:to)?)(?:\s+(?:училиште|училиштето|сколо|школо|uciliste|ucilisteto|skolo|shkolo|school))?(?![\p{L}\p{N}])/iu,
     'СЕПУГС'],
 ];
+
+/** SECOND NAMES FOR THE SAME ALIAS TARGET, tried only when the canonical row is
+ *  absent from this map snapshot. A map files an institution under whatever its
+ *  source called it: the live map carries the old military hospital as «ГОБ
+ *  8-ми Септември» (hospital) and only its bus STOP as «Болница 8ми
+ *  Септември», while an older/synthetic snapshot carries the hospital under
+ *  that second name. The canonical target stays canonical — this list is the
+ *  fallback, and a TRANSIT row is never accepted from it (a stop is named after
+ *  the place it serves; taking one was the [23:34] capture). */
+const LOCAL_PLACE_ALIAS_FALLBACKS: Record<string, string[]> = {
+  'ГОБ 8-ми Септември': ['Болница 8ми Септември'],
+};
 
 /** The map's OFFICIAL name for a colloquial one the client used, when the
  *  bounded table knows it. `undefined` for everything else — no open-ended
@@ -536,6 +570,10 @@ const CATEGORY_STEMS: Array<[string, string]> = [
   ['stadion', 'sport'], ['stadium', 'sport'], ['arena', 'sport'],
   // other institutions
   ['apotek', 'pharmacy'], ['pharmacy', 'pharmacy'],
+  // «аптека» is the standard Macedonian spelling (the table only knew the
+  // Serbian «апотека»), and it is exactly the class noun a lone needle must be
+  // refused as — a bare «кај аптеката» names no pharmacy.
+  ['aptek', 'pharmacy'],
   ['ambasad', 'embassy'], ['embassy', 'embassy'],
   ['park', 'park'], ['gradin', 'park'],
   ['skol', 'education'], ['pekara', 'bakery'], ['bakery', 'bakery'],
@@ -589,6 +627,12 @@ const SHOP_TYPES = new Set([
   'shoes', 'jewelry store', 'jewelry', 'jewellery', 'gift shop', 'toys',
   'book store', 'bookstore', 'hardware store', 'convenience store',
   'boutique', 'butik', 'store', 'shop', 'kiosk', 'variety store',
+  // A LISTING IS NOT A LANDMARK (the [08:46] capture): the map holds «Apartmani
+  // Skopje» filed as a Holiday apartment — a rental listing, not a place a
+  // client navigates by. The client's own word «APARTMAN» (his property TYPE)
+  // matched it and the whole search was anchored on a holiday flat in Центар,
+  // a kilometre away from the Аеродром block he had actually named.
+  'holiday apartment', 'apartment hotel listing',
 ]);
 
 // ── WORDS THAT ARE NEVER A PLACE ON THEIR OWN ──────────────────────────────
@@ -613,15 +657,75 @@ const NOT_A_PLACE_ALONE = new Set([
   'lokal', 'локал', 'lokalot', 'локалот', 'deloven', 'деловен',
   'plac', 'плац', 'placot', 'плацот',
   'dukjan', 'дуќан', 'mesto', 'место', 'grad', 'град',
+  // THE WHOLE PROPERTY FAMILY (the [08:46] capture): «APARTMAN» — the client's
+  // answer to the TYPE question — reached the map and came back as the holiday
+  // listing «Apartmani Skopje»; the anchor, the derived district (Центар) and
+  // every later distance were built on a place he had never named, and his own
+  // «VO AERODROM ZATOA TI REKOV KAJ TRI BISERI» had to fight it. Every type a
+  // client can answer that question with is here, both scripts and the plural/
+  // definite forms: the words of THIS business are never a venue on their own.
+  'apartman', 'апартман', 'apartmani', 'апартмани', 'apartmanot', 'апартманот',
+  'apartmanite', 'апартманите', 'apartment', 'apartments',
+  'dupleks', 'дуплекс', 'kotek', 'котек', 'vila', 'вила', 'vili', 'вили',
+  'garaza', 'гаража', 'garazhi', 'гаражи', 'garazata', 'гаражата',
+  'magacin', 'магацин', 'magacinot', 'магацинот',
+  'kancelarija', 'канцеларија', 'kancelarijaта', 'канцеларијата',
+  'zemjiste', 'земјиште', 'zemjisteto', 'земјиштето',
+  'nedviznost', 'недвижност', 'nedviznosta', 'недвижноста',
+  'imov', 'имот', 'imot', 'imotot', 'имотот', 'soba', 'соба', 'sobi', 'соби',
   // money / time vocabulary the prepositions also open („до 250“, „околу“)
   'cena', 'цена', 'cenata', 'цената', 'evra', 'евра', 'evro', 'евро',
   'denari', 'денари', 'kirija', 'кирија', 'mesecno', 'месечно',
+  // CLOSED-CLASS WORDS (the «DRUGI» capture): the client typed «DRUGI»
+  // ("other", answering a served pair) and the map returned «ПОУ „Драга
+  // Стојановска“ - с. Сопиште» — the vowel-stripped sound key of both is «drg»
+  // — so a school in Сопиште became the search anchor for two turns and every
+  // card was measured from a place nobody had named. Pronouns, quantifiers,
+  // ordinals and the "another" family are NEVER a venue name on their own; the
+  // veto is word-exact and single-token, so a real name that merely CONTAINS
+  // one («Другарче», «Три Бисери», «Две капки») still resolves when the client
+  // says the whole name.
+  'drug', 'drugi', 'drugiot', 'druta', 'druga', 'drugata', 'drugo', 'drugoto',
+  'drugite', 'друг', 'други', 'другиот', 'друга', 'другата', 'друго', 'другото',
+  'другите', 'друѓи', 'ostanato', 'останато', 'останатото', 'ostanati', 'останати',
+  'ostanatiot', 'останатиот', 'ostanata', 'останатата',
+  'sekoj', 'sekoja', 'sekoe', 'sekој', 'секој', 'секоја', 'секое', 'site', 'сите',
+  'nekoj', 'nekoja', 'nekoe', 'nekoi', 'некој', 'некоја', 'некое', 'некои',
+  'bilo', 'било', 'koj', 'koja', 'koe', 'koi', 'кој', 'која', 'кое', 'кои',
+  'shto', 'што', 'ova', 'ovoj', 'ovaa', 'ova', 'ова', 'овој', 'оваа',
+  'toa', 'toj', 'taa', 'тоа', 'тој', 'таа', 'isti', 'istiot', 'ista', 'istata',
+  'isto', 'istoto', 'исти', 'истиот', 'иста', 'истата', 'исто', 'истото',
+  'prv', 'prva', 'prvo', 'vtor', 'vtora', 'vtoro', 'tret', 'treta', 'treto',
+  'прв', 'прва', 'прво', 'втор', 'втора', 'второ', 'трет', 'трета', 'трето',
+  'eden', 'edna', 'edno', 'dva', 'dve', 'tri', 'eden', 'еден', 'една', 'едно',
+  'два', 'две', 'три', 'cetiri', 'четири',
 ]);
 
-/** True when the needle is ONE everyday word that can never name a place. */
+/** True when the needle is ONE everyday word that can never name a place.
+ *
+ *  A CLASS NOUN ALONE IS NEVER A LANDMARK (the [23:34] capture): the wish
+ *  extractor trims a place name to its last word, so «KAJ VOENA BOLNICA» also
+ *  offered the candidate «BOLNICA», which resolved to the shortest map row
+ *  carrying that word — «Болница за зависности», 4 km across town. The turn's
+ *  copy named the military hospital while the anchor slot held the addiction
+ *  clinic, and every later card was measured from the wrong place. A bare
+ *  «болница/мол/црква/училиште/амбасада/пазар…» names a KIND, not a place: the
+ *  client who really means one says WHICH one. placeCategory() already knows
+ *  that vocabulary, so the veto is the same bounded table — no new list.
+ *
+ *  EXCEPT WHERE THE BARE WORD IS THE NAME. placeCategory() answers «what KIND
+ *  of place is this word», never «how many of them are there» — and the
+ *  Assembly («Собрание на Република Македонија») is ONE building whose name is
+ *  the ordinary word for it. Vetoing that class word refused the place a
+ *  client actually names («кај Собрание»), and the four-place rotation lost its
+ *  fourth place to a miss. */
+const CLASS_NOUN_IS_A_NAME = new Set(['sobranie', 'собрание', 'assembly', 'скупштина']);
 export function refusesGenericNeedle(clean: string): boolean {
   const words = clean.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
-  return words.length === 1 && NOT_A_PLACE_ALONE.has(words[0]);
+  if (words.length !== 1) return false;
+  if (NOT_A_PLACE_ALONE.has(words[0])) return true;
+  if (CLASS_NOUN_IS_A_NAME.has(words[0])) return false;
+  return placeCategory(words[0]) !== undefined;
 }
 
 /** True when a name/type says SHOP, not a place a client navigates by. */
@@ -642,10 +746,98 @@ export function isTransitPlace(type?: string | null): boolean {
   return TRANSIT_TYPES.has(normType(type));
 }
 
+/** The SERVICE-POINT class — a cash machine or a bank branch is a tenant of
+ *  the place it is named after, never the place itself.
+ *
+ *  THE [04:46] CAPTURE: «A DO LEPTOKARIJA ?» was answered «NLB Bank ATM
+ *  Leptokarija се наоѓа на 260 метри» — an ATM INSIDE the mall the client meant.
+ *  Both rows are `contains` matches for the needle, so the distance tie-break
+ *  decided, and the ATM sits 160 m nearer the flat than «ТЦ Лептокарија». A
+ *  client measuring to «Лептокарија» means the centre, exactly as he means the
+ *  mall and not one of its shops (the tenant rule in findPoiByNameCore).
+ *
+ *  A service point steps aside only when a real PLACE also matches — a chat
+ *  that names «кај Комерцијална банка» keeps its branch. */
+const SERVICE_POINT_TYPES = new Set([
+  'atm', 'bank', 'bureau_de_change', 'money_transfer', 'currency_exchange',
+]);
+
 /** True when the client's own words name transit (then a stop IS the answer). */
 const ASKS_TRANSIT_RE = /(автобус|трамвај|bus\b|tram\b|станица|stanica|stop\b)/iu;
 
 /** True when a name reads as a COMPLEX/centre rather than a tenant inside one. */
+/** Minimum letters for a PARTIAL (word-prefix) map-name match. A two- or
+ *  three-letter vocabulary word can only ever be a coincidence: the [19:46]
+ *  capture asked «А ВО КОЈА НАСЕЛБА ИМА?» and the substring pass bound the verb
+ *  «има» to «Image Plus» (same for «нема»→«Cinematheque of Macedonia»,
+ *  «имате»→«Primatex», «да»→«ДАЛЕКС»). Whole-wordmatches keep working for
+ *  real acronyms («ГТЦ», «ТЦ»). */
+export const PARTIAL_NAME_MIN_LEN = 4;
+
+/** Minimum letters for the last-resort phonetic/variant/typo passes: below
+ *  this the fold is guessing (the phonetic pass bound «moze» to «Mezzo»).
+ *  Genuinely short names still resolve through the exact/whole-word passes. */
+export const FUZZY_NAME_MIN_LEN = 5;
+
+/** A partial name hit that respects WORD BOUNDARIES. `haystack` is a folded
+ *  map form (lowercase Latin or Cyrillic), `needle` the client's own words.
+ *
+ *  Rules, from strongest to weakest:
+ *   • the needle is a WHOLE word of the haystack (any length ≥3) — «ГТЦ» in
+ *     «Градски трговски центар (ГТЦ)». Two letters are never a name: «да» sits
+ *     as a whole word inside «Ми-Да Гранд Моторс», and a bare «тц» is answered
+ *     by the exact name pass, never by this one;
+ *   • the needle STARTS a word and is long enough to be meaningful (≥4) —
+ *     «капи» in «Капиштец», «лепто» in «Лептокарија»;
+ *   • the needle starts the whole name and is ≥4 — same contract.
+ *  A match that sits INSIDE a longer word is never taken: that is how
+ *  «нема» matched «ci-nema-theque» and «имате» matched «pri-mate-x». */
+export function wordAlignedHit(haystack: string, needle: string): boolean {
+  if (!haystack || !needle || needle.length < 3) return false;
+  const isWordChar = (ch: string | undefined): boolean => !!ch && /[\p{L}\p{N}]/u.test(ch);
+  let i = haystack.indexOf(needle);
+  while (i >= 0) {
+    const startsWord = !isWordChar(i === 0 ? undefined : haystack[i - 1]);
+    if (startsWord) {
+      const endsWord = !isWordChar(haystack[i + needle.length]);
+      if (endsWord) return true;
+      if (needle.length >= PARTIAL_NAME_MIN_LEN) return true;
+    }
+    i = haystack.indexOf(needle, i + 1);
+  }
+  return false;
+}
+
+/** Function words — a query made ONLY of these names no place. Kept as its
+ *  own list (not the map's STOPWORDS, which are place-preposition glue): these
+ *  are the verbs, particles and question words a client wraps a request in,
+ *  and handing any of them to the lookup is guessing. The [19:46] sweep found
+ *  the map answering «ИМА»→«Image Plus», «НЕМА»→«Cinematheque of Macedonia»,
+ *  «ИМАТЕ»→«Primatex», «ДА»→«Ми-Да Гранд Моторс», «MOZE»→«Mezzo». */
+const GRAMMAR_WORDS = new Set([
+  'има', 'имал', 'имала', 'имале', 'имаме', 'имате', 'имаат',
+  'нема', 'немаше', 'немате',
+  'да', 'не', 'ли', 'е', 'се', 'и', 'а', 'или', 'што', 'сто', 'каде', 'кде',
+  'кој', 'која', 'кое', 'кои', 'колку', 'како', 'зошто',
+  'може', 'можам', 'можете', 'можат', 'мора', 'морам', 'морате', 'би', 'ќе',
+  'знам', 'знаете', 'сум', 'си', 'сме', 'сте', 'сакам', 'сакате', 'барам', 'треба',
+  'ima', 'imal', 'imala', 'imale', 'imame', 'imate', 'imaat',
+  'nema', 'nemase', 'nemate',
+  'da', 'ne', 'li', 'e', 'se', 'i', 'a', 'ili', 'sto', 'kade', 'kde',
+  'koj', 'koja', 'koe', 'koi', 'kolku', 'kako', 'zosto',
+  'moze', 'mozam', 'mozete', 'mozat', 'mora', 'moram', 'morate', 'bi', 'ke',
+  'znam', 'znaete', 'sum', 'si', 'sme', 'ste', 'sakam', 'sakate', 'baram', 'treba',
+]);
+
+/** True when the query carries NO name at all — every word is a function word. */
+export function isGrammarOnlyQuery(name: string): boolean {
+  const words = cleanPoiName(String(name ?? ''))
+    .toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  if (words.length === 0) return true;
+  return words.every(w => GRAMMAR_WORDS.has(w) || STOPWORDS.has(w)
+    || GRAMMAR_WORDS.has(stripDefinite(w)) || STOPWORDS.has(stripDefinite(w)));
+}
+
 export function isComplexName(name: string): boolean {
   const words = toLatin(String(name ?? '')).replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
   return words.some(w => w === 'tc' || w === 'mall' || w === 'mol' || w === 'mallot'
@@ -1548,11 +1740,45 @@ type PoiHit = {
 };
 
 /** Row TYPES that mean "a residential block", not "a venue": a named complex
- *  yields to a place row when both match (the Лептокарија capture). */
-const RESIDENTIAL_POI_TYPES = new Set([
+ *  yields to a place row when both match (the Лептокарија capture). */const RESIDENTIAL_POI_TYPES = new Set([
   'residential', 'housing complex', 'apartment', 'apartment complex',
   'condominium complex', 'dormitory',
 ]);
+
+/** The client's own PROPERTY vocabulary — the words a flat, a room or a house
+ *  is asked for with. Such a word names what the client WANTS, never a place
+ *  he navigates by, so a needle carrying one can never resolve to a POI.
+ *
+ *  The [08:46] capture: the client answered the type question with «APARTMAN»,
+ *  the wish extractor handed «APARTMAN» to the map, the map answered
+ *  «Apartmani Skopje» (one holiday flat, 4 km away in Центар), and the whole
+ *  search was anchored on it: every later card read «Се наоѓа на 1,4 km од
+ *  Апартмани Скопје», and the widen line called that listing a «населба». One
+ *  property word is a CATEGORY answer; it must never move the geography. */
+//  EXACT FORMS, never an open stem: «стан\p{L}*» would also swallow «Станица»
+//  («Железничка станица» is a real landmark and must keep resolving), and
+//  «куќа» is deliberately ABSENT — «Куќа на културата» is a venue name, while
+//  the house category is read by the funnel's own detectors, not from the map.
+const PROPERTY_CATEGORY_WORD_RE =
+  /(?<![\p{L}])(?:апартман(?:и|от|от|ска)?|apartman(?:i|ot)?|стан|станот|станови|станче|станчето|stan|stanot|stanovi|stance|соба|соби|soba|sobi|дуплекс\p{L}*|duplex\p{L}*|гарсоњер\p{L}*|garsonjer\p{L}*)(?![\p{L}])/iu;
+
+/** Row types that are a PROPERTY LISTING — one flat/house offered for sale or
+ *  rent, filed by the map as a POI. Never a landmark: the client asks for stock
+ *  NEAR a place he can stand in front of, and a holiday flat is the thing being
+ *  sold, not the place it is near.
+ *
+ *  Deliberately NOT the whole residential family: «Буњаковец кула 5» is filed
+ *  `residential` and IS a landmark people give directions by (the map test
+ *  «miss-recovery» pins it), so only the LISTING types are refused here. */
+const LISTING_POI_TYPES = new Set([
+  'holiday apartment', 'apartment hotel', 'apartment hotel listing',
+  'lodging', 'guest house',
+]);
+
+/** True when a map row is a property LISTING — never a place anchor. */
+export function isListingPoiType(type?: string | null): boolean {
+  return LISTING_POI_TYPES.has(normType(type));
+}
 
 /** The landmark lookup's diagnostic trail, OFF unless asked for. It used to be
  *  an unconditional appendFileSync on every match — a syscall per lookup in
@@ -2380,10 +2606,31 @@ export class OfflineMapStore {
   }
 
   private findPoiByNameUncached(name: string, center?: { lat: number; lon: number }): PoiHit | undefined {
-    const direct = this.findPoiByNameCore(name, center);
+    // GRAMMAR IS NOT A PLACE NAME (the [19:46] sweep): a query built only from
+    // function words names nothing, and every pass below would be guessing —
+    // and did, binding a different POI to each of them. Refuse before the map
+    // is touched; real short names still arrive with their own noun attached.
+    if (isGrammarOnlyQuery(name)) return undefined;
+    // A RESIDENTIAL/LISTING ROW IS NEVER A PLACE (see PROPERTY_CATEGORY_WORD_RE):
+    // the client asks for stock NEAR a landmark he can stand in front of; a
+    // holiday flat or an apartment block is the thing being sold, not the place
+    // it is near. The row-side veto is what keeps a listing out even when the
+    // needle itself looked like a name.
+    const place = (hit: PoiHit | undefined): PoiHit | undefined =>
+      hit && !isListingPoiType(hit.type) ? hit : undefined;
+    const direct = place(this.findPoiByNameCore(name, center));
     if (direct) return direct;
+    // THE ALIAS'S SECOND NAME (see LOCAL_PLACE_ALIAS_FALLBACKS): the canonical
+    // row is not in this snapshot, so the colloquial name is tried against the
+    // institution's other filing. Never a stop — that is a place NAMED AFTER
+    // the one the client meant.
+    const official = officialPlaceName(name);
+    for (const alt of (official ? LOCAL_PLACE_ALIAS_FALLBACKS[official] ?? [] : [])) {
+      const hit = place(this.findPoiByNameCore(alt, center));
+      if (hit && !TRANSIT_TYPES.has(normType(hit.type))) return hit;
+    }
     for (const alt of schoolQueryForms(name)) {
-      const hit = this.findPoiByNameCore(alt, center);
+      const hit = place(this.findPoiByNameCore(alt, center));
       if (hit) return hit;
     }
     return undefined;
@@ -2396,7 +2643,21 @@ export class OfflineMapStore {
     if (!clean || clean.length < 2) return undefined;
     // NOTHING IS NAMED «САЈТ» (see NOT_A_PLACE_ALONE): in front of the fuzzy
     // passes, or the everyday word comes back as a real bakery.
-    if (refusesGenericNeedle(clean)) return undefined;
+    //
+    // A CENTERED LOOKUP IS EXEMPT, and that is the whole distinction: with a
+    // center the caller is asking «which one is at MY side» — the surroundings
+    // lane's definite shorthands («кај трговскиот», «пазарцето», «на која страна
+    // е, кај молот?»), answered from the nearest branch inside a 900 m ring. With
+    // no center the map would be GUESSING which hospital/mall the word means,
+    // and that guess is what served «Болница за зависности» for «воена болница».
+    if (!center && refusesGenericNeedle(clean)) return undefined;
+    // A PROPERTY WORD IS A CATEGORY ANSWER, NEVER A PLACE (the [08:46] capture,
+    // second half): «APARTMAN» / «APARTMANI SKOPJE» must miss here. The map
+    // holds «Apartmani Skopje» — one holiday listing filed as a POI — and the
+    // client's TYPE answer anchored the whole search on it: «Се наоѓа на 1,4 km
+    // од Апартмани Скопје» under every card, and «во истата населба до
+    // Апартмани Скопје» in the widen ask, which called a flat a naselba.
+    if (PROPERTY_CATEGORY_WORD_RE.test(clean)) return undefined;
     // Colloquial names first: the client's words become the map's own name of
     // the SAME place, so no fuzzy pass can substitute a different one.
     for (const [re, official] of LOCAL_PLACE_ALIASES) {
@@ -2446,10 +2707,17 @@ export class OfflineMapStore {
     const needleLat = translitToLatin(needleCyr);
     // A row from an older build may still carry the artifact: the index holds
     // the HEALED form (row.low), so an honest Cyrillic query still finds it.
+    // A PARTIAL MATCH MUST BE A WORD, NOT A FRAGMENT OF ONE (the [19:46]
+    // capture): the contains pass compared raw substrings, so ordinary
+    // grammar words became POIs — «ИМА»→«Image Plus», «НЕМА»→«Cinematheque of
+    // Macedonia», «ИМАТЕ»→«Primatex», «ДА»→«ДАЛЕКС». The land request «А ВО
+    // КОЈА НАСЕЛБА ИМА?» was answered «Image Plus се наоѓа во Шуто Оризари».
+    // wordAlignedHit keeps exact/whole-word and word-prefix matches (real
+    // acronyms and names still resolve) and refuses mid-word fragments.
     let rows = this.poiRows().filter(r =>
-      categoryOk(r) && (r.low.includes(needle) || r.low.includes(needleCyr)
-        || r.latin.includes(needle)
-        || (needleLat.length >= 3 && r.latin.includes(needleLat))));
+      categoryOk(r) && (wordAlignedHit(r.low, needle) || wordAlignedHit(r.low, needleCyr)
+        || wordAlignedHit(r.latin, needle)
+        || wordAlignedHit(r.latin, needleLat)));
     // A TENANT IS NEVER THE VENUE (the [21:45] «NESTO OKOLU DAJMOND MOL»
     // capture): the needle «дајмонд мол» matched ONLY the bookshop inside the
     // mall — its name carries the mall in parentheses — and the client was
@@ -2473,6 +2741,13 @@ export class OfflineMapStore {
       const nonTransit = rows.filter(r => !this.isTransit(r));
       if (nonTransit.length > 0) rows = nonTransit;
     }
+    // A CASH MACHINE IS NOT THE PLACE IT STANDS IN (the [04:46] capture): with
+    // the same `contains` match rank, the ATM 160 m nearer the flat answered
+    // for the mall the client asked about. Same demotion as transit/residential:
+    // a real place row wins, and a service point keeps its own answer when it
+    // is the only match («кај Комерцијална банка»).
+    const nonService = rows.filter(r => !SERVICE_POINT_TYPES.has(normType(r.type ?? '')));
+    if (nonService.length > 0) rows = nonService;
     // A RESIDENTIAL BLOCK IS NOT THE VENUE (the Лептокарија capture): the map
     // holds «ТЦ Лептокарија» (the mall) and «Leptokarija Mall», a HOUSING
     // COMPLEX row whose name merely starts with the word. A client saying
@@ -2653,7 +2928,11 @@ export class OfflineMapStore {
     //     pekara“ stays a MISS), and the query must carry a word of its OWN
     //     („црква“ / „katedrala“ are venue vocabulary, and alone they would
     //     resolve to whichever church is nearest).
-    if (rows.length === 0) {
+    // The last-resort passes only run for a needle long enough to be a NAME:
+    // «moze» (4 letters) was phonetically bound to «Mezzo» by this block, and a
+    // four-letter fold is pure guessing. Real short names are answered by the
+    // exact/whole-word passes above.
+    if (rows.length === 0 && clean.length >= FUZZY_NAME_MIN_LEN) {
       const want = phoneticWordKeys(clean);
       const distinctive = want.filter(w => !LEXICON_WORDS[w] && !STOPWORDS.has(w));
       if (want.length > 0 && distinctive.length > 0) {
