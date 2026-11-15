@@ -305,7 +305,18 @@ export interface SearchCenter {
 }
 
 export function resolveSearchCenter(p: PropertyRow): SearchCenter {
-  if (p.lat && p.lon && p.geo_source !== 'osm_low_confidence') {
+  // A STREET CENTROID IS NOT A BUILDING POINT (the EB 85 class):
+  // `osm_street_anchor` means the address resolved to the middle of a street —
+  // the import reaches that stage only after the exact-building and
+  // interpolation stages both failed — so the stored point is a NEIGHBOURHOOD-
+  // grade guess, exactly like `osm_low_confidence`. Trusting it let a flat the
+  // feed records in Ново Лисиче answer «на која улица е?» with a landmark and a
+  // pin from the town centre. Both weak labels now take the same path: the
+  // map's own resolution gets its chance, and whatever it cannot prove stays
+  // untrusted, so no landmark is ever measured from a street middle and served
+  // as the property's own address.
+  const weakStored = p.geo_source === 'osm_low_confidence' || p.geo_source === 'osm_street_anchor';
+  if (p.lat && p.lon && !weakStored) {
     const stored = { lat: p.lat, lon: p.lon };
     const map = _offlineMapRef?.resolvePropertyOffline(p.address ?? '');
     // ONLY A BUILDING-LEVEL MATCH MAY OUTRANK AN EXISTING TRUSTED PIN.

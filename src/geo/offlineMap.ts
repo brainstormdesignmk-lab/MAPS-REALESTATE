@@ -741,6 +741,19 @@ const TRANSIT_TYPES = new Set([
   'tram_station', 'tram_stop', 'tram station', 'tram stop',
 ]);
 
+/** «ТЦ» and «трговски центар» are the same place written short and long.
+ *  Returns the OTHER form of a name that uses one of them, so a lookup can try
+ *  both: «ТЦ Капитол» ↔ «Трговски центар Капитол». Empty when the name uses
+ *  neither (the normal case) — never a guess, only a spelling of the same name. */
+export function marketAbbreviationForms(name: string): string[] {
+  const raw = name.trim();
+  const short = raw.match(/^(?:т\.?\s?ц\.?|tc)\s+(.+)$/iu);
+  if (short) return [`Трговски центар ${short[1]}`];
+  const long = raw.match(/^(?:трговски(?:от)?\s+(?:центар|центарот)|trgovski(?:ot)?\s+centar)\s+(.+)$/iu);
+  if (long) return [`ТЦ ${long[1]}`];
+  return [];
+}
+
 /** True when the row is a bus/tram stop rather than a place. */
 export function isTransitPlace(type?: string | null): boolean {
   return TRANSIT_TYPES.has(normType(type));
@@ -2619,6 +2632,23 @@ export class OfflineMapStore {
     const place = (hit: PoiHit | undefined): PoiHit | undefined =>
       hit && !isListingPoiType(hit.type) ? hit : undefined;
     const direct = place(this.findPoiByNameCore(name, center));
+    // AN ABBREVIATION IS THE SAME PLACE (the [11:54] capture, sibling): the map
+    // files the bus stop that serves Kapitol as «ТЦ Капитол» and the mall as
+    // «Трговски центар Капитол». «ТЦ Капитол» matched only the stop, and the
+    // landmark answer then named a transit stop for the mall the client meant.
+    // «ТЦ» IS «трговски центар», so the short form is looked up BOTH ways and a
+    // real place always beats a stop named after it — the same contract as the
+    // alias fallbacks below (a stop is never a place NAMED AFTER the one asked
+    // for). Only reached when the direct hit is missing or is a stop AND the
+    // client did not ask for transit, so «автобус до ТЦ Капитол» keeps its stop
+    // — the same ASKS_TRANSIT_RE guard the core's transit demotion uses.
+    const isStop = (h: PoiHit | undefined): boolean => !!h && TRANSIT_TYPES.has(normType(h.type ?? ''));
+    if ((!direct || isStop(direct)) && !ASKS_TRANSIT_RE.test(name)) {
+      for (const alt of marketAbbreviationForms(name)) {
+        const hit = place(this.findPoiByNameCore(alt, center));
+        if (hit && !isStop(hit)) return hit;
+      }
+    }
     if (direct) return direct;
     // THE ALIAS'S SECOND NAME (see LOCAL_PLACE_ALIAS_FALLBACKS): the canonical
     // row is not in this snapshot, so the colloquial name is tried against the
@@ -2897,7 +2927,24 @@ export class OfflineMapStore {
       // comparator re-tokenized and re-transliterated every candidate O(n log n)
       // times over (dozens of rows match «Капитол Мол»), which WAS the 2.2 s a
       // single lookup cost. They are computed once per row here.
-      const scored = rows.map(r => ({ r, pv: partOfVenue(r), mr: matchRank(r) }));
+      let scored = rows.map(r => ({ r, pv: partOfVenue(r), mr: matchRank(r) }));
+      // A MALL IS THE LANDMARK, NOT THE SHOP NAMED AFTER IT (the [11:54]
+      // capture): «НА КОЕ РАСТОЈАНИЕ СЕ ОД КАПИТОЛ ?» matched the mall
+      // «Трговски центар Капитол» AND the supermarket inside it, «Ramstore -
+      // Kapitol» — and the shortest-name tie-break (18 chars beat 25) answered
+      // «Растојанието до Ramstore - Kapitol». The owner's rule for the feed is
+      // the rule for the lookup: a shop inside a mall IS the mall, and nobody
+      // navigates by the tenant. Only the CONTAINS tier is filtered (mr 3), so
+      // an exact or prefix hit always keeps its name, and a query that ASKS for
+      // the tenant class («кај Рамстор маркет», «аптека Капитол») is untouched.
+      const asksTenant = /(маркет|market|супермаркет|supermarket|продавниц|prodavnic|аптек|aptek|pharmac|бутик|butik|boutique|кафе|kafe|cafe|пекар|pekar|bakery)/iu.test(clean);
+      if (!asksTenant) {
+        const venueTier = (x: { r: PoiIndexRow }) => typeRank(x.r.type ?? '') >= typeRank('mall');
+        if (scored.some(x => x.mr === 3 && venueTier(x))) {
+          const kept = scored.filter(x => x.mr !== 3 || venueTier(x));
+          if (kept.length > 0) scored = kept;
+        }
+      }
       // Branch disambiguation: chains (TTK Banka, Tinex, Kipper…) have many
       // rows sharing one name. "Nearest to the client's context" (the shown
       // property) is the branch they mean — NEVER a global shortest-name
