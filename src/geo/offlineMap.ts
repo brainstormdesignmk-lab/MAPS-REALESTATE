@@ -674,6 +674,16 @@ const NOT_A_PLACE_ALONE = new Set([
   'lokal', 'локал', 'lokalot', 'локалот', 'deloven', 'деловен',
   'plac', 'плац', 'placot', 'плацот',
   'dukjan', 'дуќан', 'mesto', 'место', 'grad', 'град',
+  // THE SERVICE NOUNS ARE NOT PLACES (the 2026-11-16 sweep): a new OSM row is
+  // literally named «Изнајмување автомобили „Инфинити“» (a car rental), so the
+  // word a client uses to ANSWER the service question — «ZA IZNAJMUVANJE» —
+  // started binding to that shop, and a dual rent/buy search anchored on a
+  // car-rental agency 4 km away. The rent/buy words are the business's own
+  // vocabulary, exactly like «стан» and «агенција» above: never a venue alone.
+  'iznajmuvanje', 'изнајмување', 'iznajmuvam', 'изнајмувам',
+  'iznajmi', 'изнајми', 'kirie', 'кирија', 'kirendisuvanje', 'кирендисување',
+  'prodazba', 'продажба', 'prodavam', 'продавам', 'prodaden', 'продаден',
+  'kupuvanje', 'купување', 'kupuvam', 'купувам',
   // THE WHOLE PROPERTY FAMILY (the [08:46] capture): «APARTMAN» — the client's
   // answer to the TYPE question — reached the map and came back as the holiday
   // listing «Apartmani Skopje»; the anchor, the derived district (Центар) and
@@ -738,11 +748,42 @@ const NOT_A_PLACE_ALONE = new Set([
  *  fourth place to a miss. */
 const CLASS_NOUN_IS_A_NAME = new Set(['sobranie', 'собрание', 'assembly', 'скупштина']);
 export function refusesGenericNeedle(clean: string): boolean {
-  const words = clean.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+  // THE CLIENT'S PREPOSITION IS NOT A NAME (the 2026-11-16 sweep): the rent/buy
+  // answer arrives as «ZA IZNAJMUVANJE» / «ZA KUPUVANJE», and once a row was
+  // named «Изнајмување автомобили „Инфинити“» that two-word phrase bound the
+  // whole search to a car-rental agency 4 km away. The opener is stripped
+  // before the single-word test, exactly as the loose lookup already does.
+  const words = clean.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean)
+    // BOTH SCRIPTS, every governing preposition: the [19:20] replay reached this
+    // guard as «за изнајмување» — the Cyrillic «за» was missing from the list, so
+    // the two-word phrase looked like a name and the car rental became the ring.
+    .filter((w, i) => !(i === 0 && /^(?:za|за|na|на|vo|во|do|до|od|од|kaj|кај|spor|спроти|kak|как|kon|кон|so|со|pri|при)$/.test(w)));
   if (words.length !== 1) return false;
   if (NOT_A_PLACE_ALONE.has(words[0])) return true;
   if (CLASS_NOUN_IS_A_NAME.has(words[0])) return false;
   return placeCategory(words[0]) !== undefined;
+}
+
+/**
+ * TRUE WHEN THE NEEDLE IS PURELY THE RENT/BUY SERVICE VOCABULARY — the words a
+ * client uses to answer the service question, never a place. Unlike
+ * refusesGenericNeedle, this holds WITH a center: a business named
+ * «Изнајмување автомобили „Инфинити“» must not become the anchor for
+ * «ZA IZNAJMUVANJE», whatever is on screen.
+ */
+const SERVICE_NOUN_ONLY = new Set([
+  'iznajmuvanje', 'изнајмување', 'iznajmuvam', 'изнајмувам', 'iznajmi', 'изнајми',
+  'kirie', 'кирија', 'kirendisuvanje', 'кирендисување',
+  'prodazba', 'продажба', 'prodavam', 'продавам', 'prodaden', 'продаден',
+  'kupuvanje', 'купување', 'kupuvam', 'купувам',
+]);
+export function isServiceNounOnly(name: string): boolean {
+  const words = String(name ?? '').toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean)
+    // BOTH SCRIPTS, every governing preposition: the [19:20] replay reached this
+    // guard as «за изнајмување» — the Cyrillic «за» was missing from the list, so
+    // the two-word phrase looked like a name and the car rental became the ring.
+    .filter((w, i) => !(i === 0 && /^(?:za|за|na|на|vo|во|do|до|od|од|kaj|кај|spor|спроти|kak|как|kon|кон|so|со|pri|при)$/.test(w)));
+  return words.length === 1 && SERVICE_NOUN_ONLY.has(words[0]);
 }
 
 /** True when a name/type says SHOP, not a place a client navigates by. */
@@ -2738,6 +2779,40 @@ export class OfflineMapStore {
     return hit;
   }
 
+  /**
+   * THE SETTLEMENT WHOSE OWN WORDS ARE THE CLIENT'S PHRASE, if there is one.
+   *
+   * Called FIRST by findPoiByName (see the note there): a business named after an
+   * area — «Ria Shutka (suto orizari)», «Пазар Шутка» — is never the area, and
+   * the area row is what the client asked for. Every word of the phrase must be
+   * a word of the settlement (phonetic fold, so «SUTO» ≡ «ШУТО»), which is why
+   * «ТЦ КАРПОШ 3» and «кај Рампа» still reach their shops: they carry a word the
+   * settlement does not. Order: fewest extra words, then a row whose whole name
+   * IS the phrase, then the nearest to the client's context.
+   */
+  private settlementNamedBy(name: string, center?: { lat: number; lon: number }): PoiHit | undefined {
+    const want = phoneticWordKeys(name);
+    if (want.length === 0) return undefined;
+    // A VENUE WORD IN THE PHRASE MEANS THE CLIENT NAMED A BUSINESS, not an area:
+    // «ТЦ КАРПОШ 3» is the mall («ТЦ» is dropped by the phonetic fold, which is
+    // exactly why the area shortcut must not fire there). When the fold loses a
+    // word the token set kept, the phrase carries a venue word → not an area.
+    if (want.length !== placeLookupTokens(name).length) return undefined;
+    const wantSet = new Set(want);
+    const rows = this.poiRows().filter(r =>
+      isSettlementType(r.type ?? '') && [...wantSet].every(w => this.phoneSetOf(r).has(w)));
+    if (rows.length === 0) return undefined;
+    const extra = (r: PoiIndexRow): number => this.phoneOf(r).length - wantSet.size;
+    rows.sort((a, b) =>
+      extra(a) - extra(b)
+      || this.wholeNameOf(name, a.name) - this.wholeNameOf(name, b.name)
+      || (center ? distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon) : 0)
+      || a.name.length - b.name.length);
+    const best = rows[0];
+    traceLandmark(`[${new Date().toISOString()}] findPoiByName(${name}): AREA ${rows.length} match(es) → ${best.name} (${best.type})\n`);
+    return { lat: best.lat, lon: best.lon, name: best.name, type: best.type, place_url: best.place_url ?? undefined, place_id: best.place_id ?? undefined };
+  }
+
   private findPoiByNameUncached(name: string, center?: { lat: number; lon: number }): PoiHit | undefined {
     // GRAMMAR IS NOT A PLACE NAME (the [19:46] sweep): a query built only from
     // function words names nothing, and every pass below would be guessing —
@@ -2751,6 +2826,16 @@ export class OfflineMapStore {
     // needle itself looked like a name.
     const place = (hit: PoiHit | undefined): PoiHit | undefined =>
       hit && !isListingPoiType(hit.type) ? hit : undefined;
+    // AN AREA IS THE ANSWER WHEN THE CLIENT'S WORDS ARE ITS NAME (the [07:16]
+    // KARPOS rule, and its 2026-11-16 sibling «SUTO ORIZARI»): that sweep added
+    // «Ria Shutka (suto orizari)», whose parenthesised alias made a money-
+    // transfer service a BETTER match for the area's name than the settlement
+    // row itself — a business named after an area is never the area. Every word
+    // of the needle being a word of a settlement means the needle names that
+    // settlement. Any other word in the phrase («ТЦ КАРПОШ 3», «кај Рампа»)
+    // falls through untouched, so a client who names the shop keeps the shop.
+    const area = this.settlementNamedBy(name, center);
+    if (area) return area;
     const direct = place(this.findPoiByNameCore(name, center));
     // AN ABBREVIATION IS THE SAME PLACE (the [11:54] capture, sibling): the map
     // files the bus stop that serves Kapitol as «ТЦ Капитол» and the mall as
@@ -2820,6 +2905,13 @@ export class OfflineMapStore {
     // no center the map would be GUESSING which hospital/mall the word means,
     // and that guess is what served «Болница за зависности» for «воена болница».
     if (!center && refusesGenericNeedle(clean)) return undefined;
+    // …AND THE SERVICE NOUNS ARE REFUSED EVEN WITH A CENTER (the 2026-11-16
+    // sweep): «DO 350 ZA IZNAJMUVANJE» reaches the lookup with the client's
+    // property on screen, and a center is exactly what made the generic guard
+    // stand down — so the keyword bound the ring to «Изнајмување автомобили
+    // „Инфинити“», a car rental 4,4 km away. Rent/buy are the business's own
+    // vocabulary in every context; a client who means the shop names it.
+    if (isServiceNounOnly(clean)) return undefined;
     // A PROPERTY WORD IS A CATEGORY ANSWER, NEVER A PLACE (the [08:46] capture,
     // second half): «APARTMAN» / «APARTMANI SKOPJE» must miss here. The map
     // holds «Apartmani Skopje» — one holiday listing filed as a POI — and the
