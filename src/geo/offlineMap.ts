@@ -850,6 +850,10 @@ const SERVICE_POINT_TYPES = new Set([
 
 /** True when the client's own words name transit (then a stop IS the answer). */
 const ASKS_TRANSIT_RE = /(автобус|трамвај|bus\b|tram\b|станица|stanica|stop\b)/iu;
+/** What "in the same neighbourhood" means for a name lookup with a center:
+ *  the radius inside which a real place can displace a transit row of the same
+ *  name (see the transit demotion in findPoiByNameCore). */
+const LOCAL_NAME_M = 1000;
 
 /** True when a name reads as a COMPLEX/centre rather than a tenant inside one. */
 /** Minimum letters for a PARTIAL (word-prefix) map-name match. A two- or
@@ -3006,7 +3010,18 @@ export class OfflineMapStore {
     // names transit.
     if (!ASKS_TRANSIT_RE.test(clean)) {
       const nonTransit = rows.filter(r => !this.isTransit(r));
-      if (nonTransit.length > 0) rows = nonTransit;
+      // …BUT A STOP STEPS ASIDE FOR A PLACE IN THE SAME NEIGHBOURHOOD, NEVER FOR
+      // ONE ACROSS TOWN (the [01:29] «пазарцето» replay). «Пазарче Буњаковец»
+      // exists on this map only as two BUS STOPS 850 m from the flat, while the
+      // only non-transit match is the market of Тафталиџе 1.9 km away: the
+      // blanket demotion threw the local rows away and answered with the distant
+      // one, so every side answer built on it was gated out. With a center the
+      // demotion therefore applies only when a real place matches within
+      // LOCAL_NAME_M of it; without one there is no neighbourhood to speak of,
+      // and the old rule stands.
+      const localNonTransit = !!center
+        && nonTransit.some(r => distM(center.lat, center.lon, r.lat, r.lon) <= LOCAL_NAME_M);
+      if (nonTransit.length > 0 && (localNonTransit || !center)) rows = nonTransit;
     }
     // A CASH MACHINE IS NOT THE PLACE IT STANDS IN (the [04:46] capture): with
     // the same `contains` match rank, the ATM 160 m nearer the flat answered
