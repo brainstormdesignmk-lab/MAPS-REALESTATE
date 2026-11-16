@@ -117,6 +117,13 @@ const TYPE_ALIASES: Record<string, string> = {
   // Public-school spellings beyond the elementary/high pair, so a special or
   // international school is still a school (4) and never a rank-0 building.
   'international school': 'school',
+  // The November SerpApi sweep's own new spellings (R5 caught each of these
+  // ranking 0 — below a bank — which erases the institution from every answer):
+  // a state/public school written the educational way, and the two compound
+  // public classes. Never lower the class, never delete the row.
+  'general education school': 'school',
+  'university hospital': 'hospital',
+  'industrial supermarket': 'supermarket',
   'special education school': 'school',
   'school for the deaf': 'school',
   'school for the visually impaired': 'school',

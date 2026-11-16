@@ -34,8 +34,15 @@ export const SKOPJE_BBOX: [number, number, number, number] = [41.95, 21.25, 42.1
  *  Before this, a 63 m student dorm (EB 94, Пелагонија) scored rank 0 and was
  *  pushed out of the top-25 pool by shops; the row could only ever name the
  *  supermarket at the door. The bump makes every stored list stale so the feed
- *  sweep re-ranks it instead of trusting the old order. */
-export const LANDMARK_RANKING_POLICY_VERSION = 4;
+ *  sweep re-ranks it instead of trusting the old order.
+ *
+ *  v5 — the November sweep's new spellings rank: `general education school`,
+ *  `university hospital` and `industrial supermarket` were arriving unaliased
+ *  (rank 0, i.e. below a bank), and "cooking school" is classified as the paid
+ *  skills class it is. The PUBLIC-PLACE AUDIT (npm run audit:public) went from
+ *  FAIL to PASS on this map. Every stored roster predates it, so bump: the next
+ *  `hermes:landmarks:feed` re-ranks instead of serving the old order. */
+export const LANDMARK_RANKING_POLICY_VERSION = 5;
 
 /** Public Overpass mirrors — the build tries them in order (they are flaky —
  *  that is exactly why we go offline). */

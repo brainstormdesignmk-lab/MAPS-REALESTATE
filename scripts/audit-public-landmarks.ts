@@ -48,9 +48,15 @@ const REQUIRED_CLASSES = [
   'museum', 'stadium', 'police', 'fire_station',
 ];
 
-/** Rank 0 is CORRECT for these — a paid skills class is not a public anchor. */
+/** Rank 0 is CORRECT for these — a paid skills class is not a public anchor.
+ *  `cooking` was added 2026-11-16: the November sweep imported "cooking school",
+ *  which contains `school` and so landed in the PUBLIC list with rank 0. It is a
+ *  paid skills class exactly like a language or dance school (the owner's rule:
+ *  the landmarks a client means are the big PUBLIC buildings), so it belongs in
+ *  this list — aliasing it to `school` would rank a dinner-course business above
+ *  a market. */
 const COMMERCIAL_SCHOOL =
-  /(driving|beauty|martial arts|dance|ballet|music|art school|language|computer|aikido|mathematics|foreign languages|motorcycle|grappling)/;
+  /(driving|beauty|martial arts|dance|ballet|music|art school|language|computer|aikido|mathematics|foreign languages|motorcycle|grappling|cooking)/;
 
 /** Roots that mark a type as a public institution when it arrives unranked. */
 const PUBLIC_ROOT =

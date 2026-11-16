@@ -2,9 +2,18 @@ node_modules/
 dist/
 *.log
 logs/*.log
-data/*.db
-data/*.db-shm
-data/*.db-wal
+# THE MAP IS TRACKED. data/skopje-pois.db is the authoritative offline map
+# (OSM + Google layer) and it ships in git on purpose: anyone who needs it for
+# another box clones and has the complete map, and there is exactly ONE copy in
+# the world that gets edited. It is ~4 MB per rebuild — acceptable for the
+# guarantee that no second, stale map can be mistaken for this one.
+#
+# What is NOT tracked: the SerpApi keys, the runtime queue DBs, and everything
+# that is a snapshot of the map rather than the map.
+data/lina.db
+data/tui.db
+data/*-shm
+data/*-wal
 data/*.db.bak*
 .env
 GOOGLEMAPS_API_KEY.txt
@@ -12,4 +21,3 @@ tmp/
 data/*.pre-*
 data/*.bak
 map-deploy-*.tar.gz
-data/*.db.sha256

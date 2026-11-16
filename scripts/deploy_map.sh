@@ -149,6 +149,15 @@ tar czf "$PKG" "$DB" "$DB.sha256" 2>/dev/null || {
 echo "→ uploading $PKG…"
 scp -q "${SSH_OPTS[@]}" "$PKG" "$TARGET:/tmp/"
 
+# ── the copy that ships to a bot is READ-ONLY, on purpose ──────────────────
+# A bot is a READER of everything derived from the map (rosters, centers,
+# place-card identity) — only the box that authored the map may write those.
+# That rule is enforced in code (inbound_final src/feed/writePolicy.ts), and the
+# evidence it uses is exactly this: the master is the host whose map file is
+# WRITABLE. Shipping the copy writable would let an atom pass that check and
+# re-rank rosters from a stale map — the silent dual-writer. `learnAddress` and
+# the boot migration already tolerate a read-only file (they return false / are
+# wrapped), so nothing on the bot breaks.
 echo "→ deploying on target (old DB backed up to skopje-pois.db.bak-$STAMP)…"
 ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$REMOTE_DIR' && \
   cp data/skopje-pois.db data/skopje-pois.db.bak-$STAMP 2>/dev/null || true && \
@@ -157,7 +166,8 @@ ssh "${SSH_OPTS[@]}" "$TARGET" "cd '$REMOTE_DIR' && \
   ACTUAL=\$(sha256sum \"$DB\" | cut -c1-8); \
   echo \"  deployed [db:\$ACTUAL] (expected [db:$SUM])\"; \
   rm -f /tmp/$PKG; \
-  [[ \"\$ACTUAL\" == \"$SUM\" ]] && echo '  ✅ checksum match' || { echo '  ❌ CHECKSUM MISMATCH — restoring backup'; cp data/skopje-pois.db.bak-$STAMP data/skopje-pois.db; exit 1; }"
+  [[ \"\$ACTUAL\" == \"$SUM\" ]] && echo '  ✅ checksum match' || { echo '  ❌ CHECKSUM MISMATCH — restoring backup'; cp data/skopje-pois.db.bak-$STAMP data/skopje-pois.db; exit 1; }; \
+  if [[ \"\$ACTUAL\" == \"$SUM\" ]]; then chmod a-w data/skopje-pois.db && echo '  🔒 map is read-only here — this host may read rosters, not author them'; fi"
 
 # ── restart the CONSUMER, don't just suggest it ────────────────────────────
 # The map DB is opened once at TUI startup and held for the session. Shipping a

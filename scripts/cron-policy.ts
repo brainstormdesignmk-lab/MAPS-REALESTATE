@@ -51,7 +51,34 @@ export const FORBIDDEN: ReadonlyArray<{ re: RegExp; what: string }> = [
   { re: /cron-if-primary/, what: 'failover cron guard — exists only to schedule other jobs' },
   { re: /LINA_ENRICH/, what: 'legacy atom-side enrichment line' },
   { re: /map:pull/, what: 'offline map rebuild' },
+  { re: /hermes-?landmarks/i, what: 'roster writer — re-ranks every property\'s landmarks from the map (master-only work; an atom holds a COPY of the map, so its ranking would silently overwrite the master\'s audited list)' },
 ];
+
+/**
+ * The jobs that WRITE the map-derived feed columns.
+ *
+ * They are already forbidden as SCHEDULES everywhere (no map job is scheduled —
+ * see FORBIDDEN). This list exists for the role check: on an atom the refusal
+ * must name the reason (`the roster is the master's`), because "no crons" is the
+ * wrong explanation for why an atom may not write rosters.
+ */
+export const ROSTER_WRITERS: ReadonlyArray<{ re: RegExp; what: string }> = [
+  {
+    re: /hermes-?landmarks/i,
+    what: 'roster/geo writer (hermes:landmarks:feed) — the roster is the map ranked, and only the box that authored the map may rank it',
+  },
+  {
+    re: /backfill-geo|refresh-monthly|apply_overrides|hermes-nightly/i,
+    what: 'center/geo writer — property centers are measured against the authoritative map',
+  },
+];
+
+/** Roster/geo writer lines that are ACTIVE on this machine (role enforcement). */
+export function scheduledRosterWriters(text: string): CronLine[] {
+  return classifyCrontab(text).filter(
+    l => l.active && ROSTER_WRITERS.some(r => r.re.test(l.raw)),
+  );
+}
 
 /**
  * A cron line that MUST be installed and running on the atom — never stripped,
@@ -159,9 +186,19 @@ export function missingSync(text: string): Array<{ re: RegExp; what: string }> {
   );
 }
 
+/** The two roles a LINA box can have, and the one line that defines them. */
+export type HostRole = 'master' | 'atom';
+
+export const ROLE_POLICY =
+  'ROLES: the MASTER is the box that authors the map (its map file is writable) and is the ONLY writer of '
+  + 'landmark rosters, property centers and place-card identity. An ATOM is a READER for everything derived '
+  + 'from the map; it writes only owner-dictated facts (price, address) through the owner sync. An atom MUST '
+  + 'carry the */5 owner sync; the master may, but is not required to.';
+
 /** The policy, in one string — printed by --check/--remove/--install alike. */
 export const POLICY =
   'NO MAP JOB IS SCHEDULED: the map is a fixed artifact — finished and deployed by a human, '
   + 'and unchanged until a human runs the SerpApi pass again. The atom\'s owner sync '
   + '(*/5 hermes-price.sh) is the one job that must stay: it carries the owner\'s price AND '
-  + 'address corrections to the app.';
+  + 'address corrections to the app.\n'
+  + ROLE_POLICY;

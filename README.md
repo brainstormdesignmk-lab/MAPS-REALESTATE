@@ -17,10 +17,36 @@ src/store/db.ts    geo-only DB shim: landmarks cache + re-resolve queue (LINA v7
 src/compat/        Node-16 polyfill (fetch/undici) — atoms run Node 16
 src/data/          type-only shim (FeedLandmark) so src/geo needs zero rewrites
 scripts/           all network + cron jobs (the ONLY place network lives)
-data/              skopje-pois.db (offline map), address-overrides.json
+data/              skopje-pois.db (THE offline map — TRACKED), address-overrides.json
 tests/             the geo test suite (`npm test`)
-GEO_VERSION.txt    md5 stamps of src/geo — assert after any geo change
+GEO_VERSION.txt    md5 stamps of src/geo — GENERATED: npm run geo:version
 ```
+
+## The complete map ships IN GIT (OSM + Google layer)
+
+`data/skopje-pois.db` is **tracked**. Clone this repo on any machine and you have
+the complete offline map — the OSM rows *and* the Google layer (ratings, phones,
+place ids, `place_url`) — ready to point a bot at. No keys, no scrape, no export
+step:
+
+```bash
+SKOPJE_POIS_DB=$PWD/data/skopje-pois.db
+npm run map:verify          # ← proves WHICH map you have, exits non-zero if it is junk
+```
+
+`map:verify` reads the DB's own `meta` stamp (`map_version`, row counts, the
+geo-engine hash) and checks it against `data/skopje-pois.db.sha256`. It fails on
+the junk signature (`pois < 1000`, no `addresses` table, duplicated `place_id`),
+so a stale or half-written copy cannot pass as the real one.
+
+**The SerpApi keys are NOT in this repo** (`GOOGLEMAPS_API_KEY.txt` is
+gitignored, and it must stay that way). A machine that only *reads* the map needs
+no keys at all; only the master that runs the monthly pass does.
+
+**One map, one path.** `SKOPJE_POIS_DB` names it. Never add a second copy — a
+snapshot, a `.bak`, a per-atom copy another checkout can pick up — because the
+first one that a resolver finds wins silently. Snapshots are gitignored on
+purpose (`data/*.pre-*`, `data/*.bak`, `data/*.db.bak*`).
 
 ## Ownership contract (read before touching anything)
 

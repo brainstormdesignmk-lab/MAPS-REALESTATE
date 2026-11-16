@@ -37,6 +37,14 @@
  *   npx tsx scripts/install-cron.ts --require-sync
  *                                              → --check, AND fail if the owner
  *                                                price sync is missing (use on atoms)
+ *   npx tsx scripts/install-cron.ts --role atom
+ *                                              → the owner sync is required by
+ *                                                definition, AND any scheduled
+ *                                                roster/geo writer is a violation
+ *                                                (an atom is a reader for the map)
+ *   npx tsx scripts/install-cron.ts --role master
+ *                                              → this box must be able to WRITE
+ *                                                the map it claims to author
  *
  * Exit code: 0 = compliant (no forbidden jobs, and the required sync present
  * when --require-sync), 1 = violations found, sync missing, or nothing to
@@ -49,7 +57,36 @@
  */
 
 import { execSync } from 'child_process';
-import { POLICY, violations, stripForbidden, classifyCrontab, missingSync, installedSync, type CronLine } from './cron-policy';
+import * as fs from 'fs';
+import * as path from 'path';
+import { POLICY, ROLE_POLICY, violations, stripForbidden, classifyCrontab, missingSync, installedSync, scheduledRosterWriters, type CronLine, type HostRole } from './cron-policy';
+
+/** The map this box would author from — SKOPJE_POIS_DB when set, else this
+ *  repo's data/. Deliberately NOT loadConfig(): importing the config drags in
+ *  better-sqlite3, and the enforcer must stay a check that runs on a box whose
+ *  native modules are broken. But it MUST read the same env FILE the runtime
+ *  reads (~/.lina/lina.env — config.ts loads it on every entry point), or the
+ *  master is measured against whatever happens to be in the shell:
+ *  `--role master` reported ROLE MISMATCH on the actual master because the shell
+ *  had no SKOPJE_POIS_DB and the fallback pointed at this repo's data/, which
+ *  (correctly) has no map. dotenv is plain JS; it does not override real env. */
+function authoredMapPath(): string {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    require('dotenv').config({ path: path.join(require('os').homedir(), '.lina', 'lina.env') });
+  } catch { /* no env file / no dotenv — fall through to the repo default */ }
+  const raw = (process.env.SKOPJE_POIS_DB ?? '').trim();
+  return raw ? path.resolve(raw) : path.resolve(__dirname, '..', 'data', 'skopje-pois.db');
+}
+
+function mapIsWritable(file: string): boolean {
+  try {
+    fs.accessSync(file, fs.constants.W_OK);
+    return fs.statSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
 
 function currentCrontab(): string {
   try {
@@ -68,12 +105,54 @@ function printLines(lines: CronLine[]): void {
   for (const l of lines) console.log(`  [${l.active ? 'ACTIVE' : 'parked'}] ${l.raw.trim()}\n            ↳ ${l.why}`);
 }
 
-function check(requireSync: boolean): number {
+function check(requireSync: boolean, role?: HostRole): number {
   const cron = currentCrontab();
   const bad = violations(cron);
+  // An atom carries the owner sync BY DEFINITION: its conversations are the only
+  // place the owner's price and address corrections exist. Making that implicit
+  // is the point of the role — forgetting `--require-sync` was the whole gap.
+  const atom = role === 'atom';
   const sync = installedSync(cron);
-  const missing = requireSync ? missingSync(cron) : [];
+  const missing = requireSync || atom ? missingSync(cron) : [];
   console.log(POLICY);
+
+  if (role) {
+    console.log(`cron: role=${role}${atom ? ' (atom ⇒ the owner sync is required by definition)' : ''}`);
+  }
+
+  // ATOM CLAIM: an atom is a READER for everything derived from the map. A
+  // scheduled roster/geo writer on an atom would rank its OWN map copy and
+  // overwrite the master's audited lists — the exact silent dual-writer this
+  // check exists to stop. It is a violation even though FORBIDDEN already
+  // rejects it, because the refusal must name the ROLE, not just "no crons".
+  if (atom) {
+    const roster = scheduledRosterWriters(cron);
+    if (roster.length > 0) {
+      console.log(`cron: ✗ ${roster.length} MAP-DERIVED WRITER(S) SCHEDULED ON AN ATOM — an atom is a reader for rosters:`);
+      printLines(roster);
+      console.log('\nRoster/center/place-card repairs belong to the master (the box whose map file is writable).');
+      console.log(`\n${ROLE_POLICY}`);
+      console.log('\nRun: npm run cron:remove');
+      return 1;
+    }
+  }
+
+  // MASTER CLAIM: a box that cannot write its own map is not authoring anything.
+  // Fail closed here so `--role master` on a satellite (or after an accidental
+  // chmod) is reported by the enforcer instead of surfacing as a refusal deep
+  // inside a roster pass hours later.
+  if (role === 'master') {
+    const map = authoredMapPath();
+    if (!mapIsWritable(map)) {
+      console.log('cron: ✗ ROLE MISMATCH — --role master, but the map is missing or read-only:');
+      console.log(`  ${map}`);
+      console.log('  A master authors the map; this box cannot write it.\n');
+      console.log('  If this box IS the master: restore the authority (SKOPJE_POIS_DB / permissions) first.');
+      console.log('  If this box is an atom: run --role atom instead.');
+      return 1;
+    }
+    console.log(`cron: authoring map: ${map}`);
+  }
 
   if (sync.length > 0) {
     console.log(`cron: owner sync INSTALLED — ${sync.length} required line(s) that must stay:`);
@@ -99,7 +178,7 @@ function check(requireSync: boolean): number {
   }
 
   const boot = classifyCrontab(cron).filter(l => l.kind === 'boot');
-  console.log('cron: COMPLIANT — no scheduled map jobs on this machine.');
+  console.log(`cron: COMPLIANT — no scheduled map jobs on this machine${role ? ` (role=${role})` : ''}.`);
   if (boot.length > 0) console.log(`  (the boot autostart line is present — not a job: ${boot.length})`);
   return 0;
 }
@@ -144,12 +223,24 @@ const args = process.argv.slice(2);
 const removeReboot = args.includes('--remove-reboot');
 const requireSync = args.includes('--require-sync');
 
+// --role <master|atom> — the machine's job in the fleet, used by the checks above.
+let role: HostRole | undefined;
+const roleIdx = args.indexOf('--role');
+if (roleIdx >= 0) {
+  const value = (args[roleIdx + 1] ?? '').toLowerCase();
+  if (value !== 'master' && value !== 'atom') {
+    console.error(`--role needs "master" or "atom" (got "${args[roleIdx + 1] ?? ''}")`);
+    process.exit(2);
+  }
+  role = value;
+}
+
 if (args.includes('--install')) {
   process.exit(refuseInstall());
 } else if (args.includes('--remove')) {
   process.exit(remove(removeReboot));
-} else if (args.length === 0 || args.includes('--check') || requireSync) {
-  process.exit(check(requireSync));
+} else if (args.length === 0 || args.includes('--check') || requireSync || role !== undefined) {
+  process.exit(check(requireSync, role));
 } else {
   console.error(`Unknown arg(s): ${args.join(' ')} (use --check [--require-sync] | --remove [--remove-reboot])`);
   process.exit(2);
