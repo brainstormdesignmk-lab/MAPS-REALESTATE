@@ -2799,8 +2799,14 @@ export class OfflineMapStore {
     // word the token set kept, the phrase carries a venue word → not an area.
     if (want.length !== placeLookupTokens(name).length) return undefined;
     const wantSet = new Set(want);
+    // CITY ROWS COUNT AS SETTLEMENTS HERE (the [09:50] family): «Скопје» has two
+    // city rows and a «Скопје Север» suburb, so a scan without «city» answered
+    // the CITY with a district — and the caller's city veto (a city anchor
+    // measures nothing) could never fire. The fewest-extra-words order keeps the
+    // city itself ahead of every district named after it.
     const rows = this.poiRows().filter(r =>
-      isSettlementType(r.type ?? '') && [...wantSet].every(w => this.phoneSetOf(r).has(w)));
+      (isSettlementType(r.type ?? '') || normType(r.type ?? '') === 'city')
+      && [...wantSet].every(w => this.phoneSetOf(r).has(w)));
     if (rows.length === 0) return undefined;
     const extra = (r: PoiIndexRow): number => this.phoneOf(r).length - wantSet.size;
     rows.sort((a, b) =>
