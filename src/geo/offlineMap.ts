@@ -754,6 +754,21 @@ export function marketAbbreviationForms(name: string): string[] {
   return [];
 }
 
+/** THE SETTLEMENT CLASS — an OSM row that IS an area rather than a place in
+ *  it (`suburb`, `neighbourhood`, `quarter`, `hamlet`, `village`, `locality`).
+ *  The map files a naselba as a centroid row: «Центар» [suburb], «Скопје
+ *  Север» [suburb], «Карпош 3» [suburb]. The TYPE decides, never the name —
+ *  the same map also carries «Centar Bar», a bus station called «Скопје
+ *  Север ЕВН» and the mall «Карпош 3», all named AFTER the area. One class
+ *  test for the whole appliance: the handler's where-answer (`isSettlementPlace`
+ *  in `src/handlers/inbound.ts`) delegates here. */
+export const SETTLEMENT_TYPES = new Set([
+  'suburb', 'neighbourhood', 'neighborhood', 'quarter', 'hamlet', 'village', 'locality',
+]);
+export function isSettlementType(type?: string | null): boolean {
+  return SETTLEMENT_TYPES.has(normType(type));
+}
+
 /** True when the row is a bus/tram stop rather than a place. */
 export function isTransitPlace(type?: string | null): boolean {
   return TRANSIT_TYPES.has(normType(type));
@@ -960,7 +975,12 @@ export function phoneticWordKeys(name: string): string[] {
     .replace(/kj/g, 'k')
     .replace(/lj/g, 'l')
     .replace(/nj/g, 'n');
-  return [...new Set(t.split(' ').filter(w => w.length >= 3).map(fold))];
+  // A NUMBER IS A DISCRIMINATOR, NOT A SOUND (the [07:16] «KARPOS 3» capture):
+  // the ≥3-letter rule dropped «3», so a client naming «Карпош 3» folded to the
+  // bare «карпош» and the pass answered «Карпош» — the wrong quarter of the
+  // municipality. Digits ride through verbatim; they only ever NARROW a match
+  // (every typed word must be a word of the row), never broaden one.
+  return [...new Set(t.split(' ').filter(w => w.length >= 3 || /^\d+$/u.test(w)).map(fold))];
 }
 
 /**
@@ -1258,6 +1278,92 @@ export function identityTokens(name: string): string[] {
 /** Unordered, noise-free identity key (digits kept). */
 export function identityKey(name: string): string {
   return [...new Set(identityTokens(name))].sort().join(' ');
+}
+
+/** DOES THIS MAP ROW NAME THE PLACE THE CLIENT SAID?
+ *
+ *  The place-miss digest has to answer one question about a logged row: does the
+ *  name bind against TODAY's map, or is it still a gap? `findPoiByName` cannot
+ *  answer it — it is a fuzzy lookup that always returns its best guess, so a
+ *  bare fragment "resolves" to whatever row is nearest: «амбасадата» came back
+ *  as «Паркинг на амбасадата на САД» and «SKOPJE SEVER E» as the bus station
+ *  «Скопје север ЕВН». Both would have been reported as "nothing to add", which
+ *  is the opposite of the truth.
+ *
+ *  The rule is the resolver's own coverage rule, kept here so every reader of
+ *  the corpus applies the same one:
+ *    • EVERY word the client said is a word of the row's name, and
+ *    • the row's name OPENS with one of them — a name that puts a brand in
+ *      front of the client's words is a different place.
+ *  Script, case and punctuation fold through toCyrillic, the map's own bridge.
+ *  Not a similarity measure: a near-spelling is exactly what this must refuse. */
+export function mapNameCoversClientWords(clientText: string, rowName: string): boolean {
+  const said = foldNameWords(stripPlaceOpener(clientText));
+  const have = foldNameWords(rowName);
+  if (said.length === 0 || have.length === 0) return false;
+  if (!said.every(w => have.includes(w))) return false;
+  if (said.includes(have[0]!)) return true;
+  // …OR THE MAP DECLARED IT AN ALIAS AFTER A SEPARATOR: «Управа за јавни
+  // приходи - УЈП», «СЈО - Специјално…» filed the other way round. That is the
+  // map's OWN statement of the same institution (the same marker `aliasRank`
+  // trusts), so a client saying «УЈП» binds that row. A bare tail is NOT enough:
+  // the map also holds «тобако РАМПА», a kiosk named after the Рампа area, and
+  // accepting it called a tobacco shop the place the client named.
+  const segments = rowName.split(/\s*[-–—:(]\s*|\s+\(\s*/u);
+  if (segments.length > 1) {
+    const tail = foldNameWords(segments[segments.length - 1]!.replace(/\)+$/u, ''));
+    if (tail.length > 0 && said.every(w => tail.includes(w)) && said.includes(tail[0]!)) return true;
+  }
+  return false;
+}
+
+/** THE OPENER THE EXTRACTOR KEPT. The logged fragment carries the word that
+ *  introduced it («KAJ SKOPJE SEVER», «VO CENTAR», «OKOLU RAMPA»), and a
+ *  preposition of its own made a neighbourhood read as a missing place — the
+ *  two digest tools strip it before asking the map, and one of them forgetting
+ *  (the audit did) is exactly the two-reports-one-corpus defect. */
+export const PLACE_OPENER_RE =
+  /^(?:kaj|кај|vo|во|na|на|do|до|okolu|околу|blizu|близу|kon|кон|sproti|спроти|nasproti|наспроти|niz|низ|od|од)\s+/iu;
+
+/** A DISCOURSE PARTICLE IS NOT PART OF A NAME either: «PA AERODROM» is «и
+ *  аеродром» — «па» is the filler a client starts a thought with. The resolver
+ *  answers «Аеродром» correctly, and the coverage test refused to believe it
+ *  because the row has no «pa» in it, so the digest listed a name that binds
+ *  today as a map gap (42 rows). Stripped only as a HEAD WORD, never inside a
+ *  name, so «Паб Беертија» keeps its «паб». */
+export const PLACE_FILLER_RE = /^(?:pa|па|epa|епа|abe|абе|aj|ај|ama|ама|ama|well)\s+/iu;
+export function stripPlaceOpener(text: string): string {
+  return (text ?? '').replace(PLACE_FILLER_RE, '').replace(PLACE_OPENER_RE, '').trim();
+}
+
+/** DOES THE ROW OPEN WITH ONE OF THE CLIENT'S WORDS? The looser form of the same
+ *  rule, for PROPOSING an alias rather than concluding one binds: the client's
+ *  filler («PA AERODROM» = «и аеродром») may not be in the row's name, but the
+ *  row's HEAD must still be a word he said — otherwise the proposal is a
+ *  coincidence and the digest offers «Kindergarten "Crvenkapa" - Aerodrom» as
+ *  the row for «PA AERODROM». */
+export function mapNameOpensWithClientWord(clientText: string, rowName: string): boolean {
+  const said = foldNameWords(stripPlaceOpener(clientText));
+  const have = foldNameWords(rowName);
+  if (said.length === 0 || have.length === 0) return false;
+  return said.includes(have[0]!);
+}
+
+function foldNameWords(s: string): string[] {
+  // THE SPELLING FOLD IS THE RESOLVER'S (the [07:16] «KARPOS» reading): the map
+  // writes «Карпош» and a client's keyboard writes «KARPOS» (s for ш), and the
+  // lookup binds them through `phoneticWordKeys` — so the digest's "does it bind
+  // today?" test must fold the same way or it calls a name that RESOLVES a gap
+  // forever. Per-word, with the Cyrillic fold as the fallback for a word too
+  // short to carry a phonetic key («УЈП» is three letters and survives, «Ц»
+  // would not).
+  const fold = (w: string): string => {
+    if (/^\d+$/u.test(w)) return w;
+    const k = phoneticWordKeys(w);
+    return k[0] ?? w.toLowerCase();
+  };
+  return toCyrillic(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ')
+    .filter(Boolean).map(fold);
 }
 
 // ── RETRIEVAL TOKENS (client-typed place words) ─────────────────────────────
@@ -2666,6 +2772,25 @@ export class OfflineMapStore {
     return undefined;
   }
 
+  /** THE WHOLE NAME, WORD FOR WORD — 0 when `name` is the client's words and
+   *  nothing else, 1 otherwise. Compared PHONETICALLY, because the map writes
+   *  «ш» and a client's keyboard often writes «s» («KARPOS», «SUTO ORIZARI»).
+   *  This is what separates the place a client named from every place NAMED
+   *  AFTER it: «Карпош» from «Карпош 3» (the mall), «Хотел Карпош» and the bus
+   *  stops — the [07:16] capture where «KARPOS» answered with a shopping centre
+   *  and the funnel measured every distance from it. */
+  private wholeNameOf(clientWords: string, name: string): number {
+    const ph = (w: string): string => {
+      if (/^\d+$/u.test(w)) return w;
+      const k = phoneticWordKeys(w);
+      return k[0] ?? w.toLowerCase();
+    };
+    const want = cleanPoiName(clientWords).split(/\s+/u).filter(Boolean).map(ph);
+    const have = cleanPoiName(name).split(/\s+/u).filter(Boolean);
+    if (want.length === 0 || have.length !== want.length) return 1;
+    return have.every((w, i) => ph(w) === want[i]) ? 0 : 1;
+  }
+
   private findPoiByNameCore(name: string, center?: { lat: number; lon: number }): PoiHit | undefined {
     if (!this.db || !name) return undefined;
     // Strip location prepositions AND feed typos of them ("как" for "кај").
@@ -2903,6 +3028,21 @@ export class OfflineMapStore {
         if (row.low.startsWith(needle) || row.low.startsWith(needleCyr) || row.latin.startsWith(latinNeedle)) return 2;
         return 3;
       };
+      // THE WHOLE NAME, WORD FOR WORD (the [07:16] «KARPOS» capture): a client
+      // typing the AREA writes its name and nothing else — «KARPOS», «KARPOS 3»
+      // (Serbian ASCII, s for ш) — and every row NAMED AFTER the area matched it
+      // as a prefix: the mall «Карпош 3», the bus stops, «Хотел Карпош». The
+      // prefix tier then handed the winner to typeRank, where a mall (8) beats a
+      // naselba (100), so «KARPOS» answered with a shopping centre 1 km away and
+      // the funnel measured every distance from it. Two ORDER keys, both applied
+      // before significance and neither widening a candidate set: a row whose
+      // whole name is the client's words (phonetically — the map writes «ш» and
+      // the client's keyboard writes «s», so `phoneticWordKeys` is the fold)
+      // outranks a longer row that merely starts with them, and a SETTLEMENT row
+      // that IS the name outranks a POI named after it («Карпош 3» the suburb,
+      // not «Карпош 3» the mall). «Бисер» is untouched: neither travel agency
+      // nor mall is the whole word, so significance still decides there.
+      const wholeName = (row: PoiIndexRow): number => this.wholeNameOf(clean, row.name);
       // …and a row that is a PART of the venue (food court, parking, apteka)
       // never outranks the venue itself.
       const needleWords = new Set(placeLookupTokens(cleanPoiName(clean)));
@@ -2927,7 +3067,9 @@ export class OfflineMapStore {
       // comparator re-tokenized and re-transliterated every candidate O(n log n)
       // times over (dozens of rows match «Капитол Мол»), which WAS the 2.2 s a
       // single lookup cost. They are computed once per row here.
-      let scored = rows.map(r => ({ r, pv: partOfVenue(r), mr: matchRank(r) }));
+      let scored = rows.map(r => ({ r, pv: partOfVenue(r), mr: matchRank(r), wn: wholeName(r) }));
+      const areaFirst = (x: { r: PoiIndexRow; wn: number }): number =>
+        x.wn === 0 && isSettlementType(x.r.type) ? 0 : 1;
       // A MALL IS THE LANDMARK, NOT THE SHOP NAMED AFTER IT (the [11:54]
       // capture): «НА КОЕ РАСТОЈАНИЕ СЕ ОД КАПИТОЛ ?» matched the mall
       // «Трговски центар Капитол» AND the supermarket inside it, «Ramstore -
@@ -2952,6 +3094,8 @@ export class OfflineMapStore {
       scored.sort((a, b) =>
         a.pv - b.pv
         || a.mr - b.mr
+        || a.wn - b.wn
+        || areaFirst(a) - areaFirst(b)
         || (!center && a.mr === 2 && b.mr === 2 ? typeRank(b.r.type) - typeRank(a.r.type) : 0)
         || (center
           ? distM(center.lat, center.lon, a.r.lat, a.r.lon) - distM(center.lat, center.lon, b.r.lat, b.r.lon)
@@ -2990,13 +3134,17 @@ export class OfflineMapStore {
           .filter(r => !this.isShop(r));
         if (phoneticRows.length > 0) {
           const extra = (r: PoiIndexRow): number => this.phoneOf(r).length - wantSet.size;
+          const wholeName = (r: PoiIndexRow): number => this.wholeNameOf(clean, r.name);
           // Same tie-breaks as the substring pass above (fewest extra words,
-          // then the nearest branch, then the SHORTER name), so the SAME place
-          // answers for either spelling: «Католичка» (the map's own letters)
-          // and «KATOLICKA» (the client's) must not name two different
-          // churches.
+          // then the AREA before a POI named after it, then the nearest branch,
+          // then the SHORTER name), so the SAME place answers for either
+          // spelling: «Католичка» (the map's own letters) and «KATOLICKA»
+          // (the client's) must not name two different churches — and «KARPOS
+          // 3» names the naselba, not the mall of the same name.
           phoneticRows.sort((a, b) =>
             extra(a) - extra(b)
+            || (wholeName(a) - wholeName(b))
+            || (isSettlementType(a.type) ? 0 : 1) - (isSettlementType(b.type) ? 0 : 1)
             || (center
               ? distM(center.lat, center.lon, a.lat, a.lon) - distM(center.lat, center.lon, b.lat, b.lon)
               : a.name.length - b.name.length));
@@ -3109,6 +3257,29 @@ export class OfflineMapStore {
       if (this.idKeyOf(rows[0]) !== this.idKeyOf(rows[1])) return undefined;
     }
     return rows[0];
+  }
+
+  /** DOES THIS LOGGED NAME BIND ON TODAY'S MAP? One implementation for every
+   *  reader of the place-miss corpus (the audit and the operator CLI): a miss
+   *  row says a turn failed on ITS day, and calling a name that resolves today
+   *  a map gap keeps the operator closing the same ticket forever.
+   *
+   *  The answer is the RESOLVER's own: `findPoiByName` (with the extractor's
+   *  opener stripped — «KAJ SKOPJE SEVER» names «Скопје Север»), then the
+   *  coverage guard on the row it chose. Not "any row that happens to cover":
+   *  «KARPOS» also matches the mall «Карпош 3», and reporting a shopping centre
+   *  as the target of an area name is the same class of lie as the gap itself. */
+  todayBinding(text: string): { name: string; type?: string } | undefined {
+    if (!this.db) return undefined;
+    const bare = stripPlaceOpener(text);
+    for (const t of bare && bare !== text ? [text, bare] : [text]) {
+      if (!t || t.length < 3) continue;
+      try {
+        const hit = this.findPoiByName(t);
+        if (hit && mapNameCoversClientWords(t, hit.name)) return { name: hit.name, type: hit.type };
+      } catch { /* a digest probe may never break the caller */ }
+    }
+    return undefined;
   }
 
   /** The typo-tolerant lookup as a MISS-RECOVERY call: the client's words, one
