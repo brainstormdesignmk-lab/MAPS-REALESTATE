@@ -8,6 +8,8 @@
 //   pois      — add POIs missing from OSM
 //   replaces  — delete wrong POI entries and insert corrected coords
 //   addresses — individual house numbers missing from OSM
+//   pinfixes  — move one row's pin, keeping its place_id/rating (a capture may
+//               refine a pin, never relocate the place — see captureMayMovePin)
 //   aliases   — feed spelling differs from OSM spelling
 //
 // Usage: npx tsx scripts/apply_overrides.ts
@@ -20,6 +22,7 @@ interface OverrideFile {
   pois?: Array<{ name: string; type: string; lat: number; lon: number; note?: string }>;
   replaces?: Array<{ name: string; type: string; lat: number; lon: number; note?: string }>;
   addresses?: Array<{ street: string; housenumber: string; lat: number; lon: number; note?: string }>;
+  pinfixes?: Array<{ name: string; type?: string; lat: number; lon: number; note?: string }>;
   aliases?: Array<{ street: string; osmStreet: string; note?: string }>;
 }
 
@@ -52,6 +55,24 @@ function main() {
     db.prepare('INSERT INTO pois (name, type, lat, lon) VALUES (?, ?, ?, ?)')
       .run(r.name, r.type, r.lat, r.lon);
     console.log(`+ poi   ${r.name} [${r.type}] @ ${r.lat},${r.lon} (corrected)`);
+    added++;
+  }
+
+  // --- Pin fixes (correct a row's coordinates WITHOUT losing its identity) --
+  // `replaces` deletes and re-inserts, which drops the Google place_id, the
+  // rating and the place card — correct for a wrong row, wrong for a row that is
+  // right except for where the capture put it (the «Беверли Хилс» 847 m swing: a
+  // Google record pinned at the sales office instead of the building). This
+  // section moves the pin only; name, type and identity stay.
+  for (const f of ov.pinfixes ?? []) {
+    const where = f.type
+      ? db.prepare('UPDATE pois SET lat = ?, lon = ? WHERE name = ? AND type = ?').run(f.lat, f.lon, f.name, f.type)
+      : db.prepare('UPDATE pois SET lat = ?, lon = ? WHERE name = ?').run(f.lat, f.lon, f.name);
+    if (where.changes === 0) {
+      console.warn(`! pinfix skipped (${f.name}): no such row`);
+      continue;
+    }
+    console.log(`~ pin   ${f.name}${f.type ? ` [${f.type}]` : ''} @ ${f.lat},${f.lon} (${where.changes} row${where.changes === 1 ? '' : 's'})${f.note ? ` — ${f.note}` : ''}`);
     added++;
   }
 

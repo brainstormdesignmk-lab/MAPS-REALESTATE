@@ -154,7 +154,20 @@ function feedRosterSlots(
     // more — drop it and let the map scan serve the in-ring places. No centre
     // → no measurement → no claim.
     if (!near) {
-      try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre to measure from\n`); } catch {}
+      // NO CENTRE — the FEED'S OWN DECLARATION is the only evidence left, and
+      // the ladder still owes the client a nearby answer (the owner's rule, the
+      // [16:54] capture: a street-anchor row answered «се води во населбата …
+      // пред посетата» on the FIRST ask). The roster is what the agency itself
+      // publishes for this property, so a slot whose declared distance fits the
+      // ring is served; one with NO declared distance is an unmeasured claim and
+      // stays dropped, exactly as before.
+      const declaredM = Number(e?.distance_m);
+      if (!Number.isFinite(declaredM) || declaredM > FEED_LANDMARK_MAX_M) {
+        try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre and no declared distance in ring\n`); } catch {}
+        continue;
+      }
+      seen.add(key);
+      out.push({ landmark: name, lat, lon, place_url, place_id });
       continue;
     }
     const claimM = _distM(near.lat, near.lon, lat, lon);

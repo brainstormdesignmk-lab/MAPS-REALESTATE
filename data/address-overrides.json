@@ -23,7 +23,9 @@
     "landmark is served in the sentence 'во близина на X' to a client who is",
     "being denied the exact address. Every existing row is a supermarket, mall,",
     "school or embassy on that test. A private company office fails it: the",
-    "client cannot walk to 'кај Kantar Brima'."
+    "client cannot walk to 'кај Kantar Brima'.",
+    "  pinfixes  — move ONE row's pin without losing its place_id/rating",
+    "              (a capture may refine a pin, never relocate the place)"
   ],
   "excluded": [
     {
@@ -115,6 +117,15 @@
       "lon": 21.418169,
       "place_id": "0x1354144841501047:0x71a2f884c5dc3050",
       "note": "EB 63 feed spelling; same Google place as Амбасада на Црна Гора."
+    }
+  ],
+  "pinfixes": [
+    {
+      "name": "Беверли Хилс",
+      "type": "mall",
+      "lat": 41.9936802,
+      "lon": 21.4162282,
+      "note": "Капиштец, not Центар: the November 2026 capture re-pinned the complex at its sales office by the cathedral (41.99877,21.42390 — 847 m away). OSM's building footprint (way/176189216) is the ground truth; the Google identity, rating and place card stay on the row."
     }
   ],
   "aliases": [

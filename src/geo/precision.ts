@@ -11,6 +11,35 @@ export function distM(lat1: number, lon1: number, lat2: number, lon2: number): n
   return 2 * R_EARTH * Math.asin(Math.sqrt(a));
 }
 
+// ── A CAPTURE MAY REFINE A PIN, NEVER RELOCATE THE PLACE ────────────────────
+// WHY: the monthly top-up backfills an existing row by place_id and used to
+// write Google's lat/lon unconditionally (refresh-monthly's `updateAll`). A
+// Google record whose own pin is the sales OFFICE instead of the building then
+// teleported the map's row: the November 2026 sweep moved «Беверли Хилс» from
+// its Капиштец building footprint (41.99368, 21.41623) to the agency's office by
+// the cathedral (41.99877, 21.42390) — 847 m — so every «кај Беверли Хилс»
+// answer named the neighbourhood Центар instead of Капиштец, and the landmark
+// distances of that quarter were measured from the wrong side of the city.
+//
+// THE RULE: a re-capture may correct a pin by up to a block's width; beyond that
+// it is a DIFFERENT place (a namesake, an office, a branch) and the map keeps
+// the pin it already had. The override drawer is how a genuine relocation is
+// accepted, deliberately and once, instead of every month by accident.
+export const CAPTURE_PIN_DRIFT_M = 300;
+
+/** May a capture replace a stored pin with the one it just returned?
+ *  `undefined`/empty stored coordinates mean the row never had a pin, so the
+ *  capture is the only evidence and may fill it (drift = 0). */
+export function captureMayMovePin(
+  from: { lat: number; lon: number } | undefined | null,
+  to: { lat: number; lon: number },
+  maxM = CAPTURE_PIN_DRIFT_M,
+): { ok: boolean; movedM: number } {
+  if (!from || !Number.isFinite(from.lat) || !Number.isFinite(from.lon)) return { ok: true, movedM: 0 };
+  const movedM = distM(from.lat, from.lon, to.lat, to.lon);
+  return { ok: movedM <= maxM, movedM };
+}
+
 export function walkMinutes(meters: number): number {
   return Math.max(1, Math.round(meters / 80)); // 80 m/min pace
 }

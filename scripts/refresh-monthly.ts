@@ -39,13 +39,13 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as dotenv from 'dotenv';
-import { distM } from '../src/geo/precision';
+import { CAPTURE_PIN_DRIFT_M, captureMayMovePin, distM } from '../src/geo/precision';
 import { assessGeocode, extractGeocodeEvidence, type GeocodeEvidence } from '../src/geo/geocodeGuard';
 import { categoriesForRun } from '../src/geo/serpCapture';
 import { planCoverage, seedTileScansFromPois } from '../src/geo/tileCoverage';
 import { verifyMapDb } from '../src/geo/runVerify';
 import { decideSpendGate } from '../src/geo/spendGate';
-import { identityHeal } from './identity-heal';
+import { collapseGeometryTwins, identityHeal } from './identity-heal';
 import { stripBlindFusions } from './strip-blind-fusions';
 import {
   REPO_ROOT, resolveRuntimeDb, resolveMapDb, harvestQueues,
@@ -476,8 +476,16 @@ async function phaseB(db: Database.Database): Promise<number> {
       review_count, rating, plus_code, phone, website, price_level, closed, types)
      VALUES (?, ?, ?, ?, 'google', ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
-  const findByCid = db.prepare(`SELECT rowid FROM pois WHERE place_id = ?`);
+  const findByCid = db.prepare(`SELECT rowid, lat, lon FROM pois WHERE place_id = ?`);
   const updateCoords = db.prepare(`UPDATE pois SET lat = ?, lon = ? WHERE rowid = ?`);
+  // The same backfill WITHOUT the pin — used when the capture's coordinate is
+  // too far away to be this place (see captureMayMovePin).
+  const updateFieldsOnly = db.prepare(
+    `UPDATE pois SET review_count = ?, rating = ?, plus_code = ?,
+       phone = ?, website = ?, price_level = ?, closed = ?, types = ?
+     WHERE rowid = ?`
+  );
+  const pinDrifts: Array<{ name: string; movedM: number }> = [];
   // Enrichment backfill: an existing row (by place_id) gets any capture
   // fields it predates — identity pattern, now applied to all fields.
   const updateAll = db.prepare(
@@ -546,14 +554,27 @@ async function phaseB(db: Database.Database): Promise<number> {
         inserted++;
       } else if (cap.place_id) {
         // Row exists but may predate identity/capture — backfill EVERYTHING
-        // by place_id (coords + all capture fields).
-        const existing = findByCid.get(cap.place_id) as { rowid: number } | undefined;
+        // by place_id (coords + all capture fields), EXCEPT a pin that is not
+        // this place's any more: a capture may refine a pin, never relocate it
+        // (captureMayMovePin — the «Беверли Хилс» 847 m swing).
+        const existing = findByCid.get(cap.place_id) as
+          { rowid: number; lat: number; lon: number } | undefined;
         if (existing) {
-          updateAll.run(
-            cap.lat, cap.lon, cap.review_count, cap.rating, cap.plus_code,
-            cap.phone, cap.website, cap.price_level, cap.closed, cap.types,
-            existing.rowid,
-          );
+          const move = captureMayMovePin(existing, cap);
+          if (move.ok) {
+            updateAll.run(
+              cap.lat, cap.lon, cap.review_count, cap.rating, cap.plus_code,
+              cap.phone, cap.website, cap.price_level, cap.closed, cap.types,
+              existing.rowid,
+            );
+          } else {
+            updateFieldsOnly.run(
+              cap.review_count, cap.rating, cap.plus_code,
+              cap.phone, cap.website, cap.price_level, cap.closed, cap.types,
+              existing.rowid,
+            );
+            pinDrifts.push({ name: cap.name, movedM: Math.round(move.movedM) });
+          }
           identityBackfilled++;
           enriched++;
         }
@@ -569,6 +590,16 @@ async function phaseB(db: Database.Database): Promise<number> {
 
   phaseBScans = spent;
   log(`  Inserted ${inserted} new Google POIs, backfilled ${identityBackfilled} rows (${enriched} with capture fields) (SerpApi left: ${serpApiLeft})`);
+  if (pinDrifts.length > 0) {
+    // Report, never silently keep: a refusal is either the map being right (the
+    // row's own footprint) or the map being wrong (a stale pin the capture just
+    // proved wrong) — only a human can tell, so the names go to the operator.
+    const worst = [...pinDrifts].sort((a, b) => b.movedM - a.movedM).slice(0, 5);
+    log(`  ⚠ Refused ${pinDrifts.length} pin move(s) over ${CAPTURE_PIN_DRIFT_M} m ` +
+      `(kept the stored pin, capture fields still backfilled): ` +
+      worst.map(p => `${p.name} ${p.movedM} m`).join(', ') +
+      (pinDrifts.length > worst.length ? `, +${pinDrifts.length - worst.length} more` : ''));
+  }
   return inserted;
 }
 
@@ -593,6 +624,14 @@ export function phaseB2(db: Database.Database): number {
     log(`  Stripped ${stripped.stripped} blind fusions before healing (${stripped.kept} kept)`);
   }
   log(`  Healed ${healed} OSM rows from Google anchors (translit + semantic lexicon + embassy uniqueness)`);
+  // A healed LEGACY row and the OSM element it duplicates are one place; the
+  // element keeps the geometry and takes the identity (collapseGeometryTwins).
+  const twins = collapseGeometryTwins(db);
+  if (twins.adopted + twins.dropped > 0) {
+    log(`  Collapsed ${twins.adopted + twins.dropped} geometry twin(s) ` +
+      `(${twins.adopted} identity row(s) folded into their element row, ${twins.dropped} dead duplicate(s) removed)`);
+  }
+  if (twins.conflicts > 0) log(`  ⚠ ${twins.conflicts} twin pair(s) left alone — the element row owns another identity`);
   return healed;
 }
 

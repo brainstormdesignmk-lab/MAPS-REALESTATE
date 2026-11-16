@@ -70,6 +70,117 @@ function tenantAbsorbsVenue(anchorType: string | null | undefined, rowType: stri
 // cannot drift apart. Re-exported here for strip-blind-fusions.ts.
 export { countriesIn, countryContradiction } from '../src/geo/offlineMap';
 
+/**
+ * A GEOMETRY TWIN IS ONE PLACE, NOT TWO.
+ *
+ * The heal above gives an identity to a LEGACY row (an `osm` row imported before
+ * rows carried `osm_key`) and the weekly OSM restore keeps the real element row
+ * as well — so the map ends up with the same place TWICE: the healed row with
+ * Google's identity and no geometry, next to the OSM element with geometry and no
+ * identity. The November 2026 audit found 142 of these pairs, most at 0 m
+ * ("Амбасада на Турција" twice at the identical coordinate, «Зегин» twice, the
+ * «Беверли Хилс» mall twice): they split the review count from the footprint, and
+ * a rename or a search that matches only one of them answers half a place.
+ *
+ * THE RULE: same `source`, same name (folded), same type, within 3 m — that is
+ * one place described twice. The element row SURVIVES (its geometry is the map's
+ * ground truth) and adopts the legacy row's identity and capture fields; the
+ * legacy row is deleted inside the same transaction, in the order the unique
+ * `place_id` index demands (release the identity first).
+ *
+ * WHY 3 m AND NOT 30: two branches of a chain, a shop and its neighbour, or two
+ * ATMs in one hall are routinely 5–30 m apart with the same name and type; only
+ * a duplicate sits on top of itself. A twin FURTHER away is the capture-drift
+ * class (see captureMayMovePin) and must never be collapsed here.
+ */
+export interface TwinCollapse {
+  /** Legacy identity rows that handed their identity to the element row. */
+  adopted: number;
+  /** Legacy rows with no identity of their own, removed as dead weight. */
+  dropped: number;
+  /** Pairs left alone because the element row already owns another identity. */
+  conflicts: number;
+}
+
+const GEOMETRY_TWIN_M = 3;
+
+const foldTwinName = (n: string | null | undefined): string =>
+  String(n ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+
+export function collapseGeometryTwins(db: Database.Database, maxM = GEOMETRY_TWIN_M): TwinCollapse {
+  interface LegacyRow {
+    rowid: number; name: string; type: string | null; lat: number; lon: number;
+    place_id: string | null; review_count: number | null; rating: number | null;
+    plus_code: string | null; phone: string | null; website: string | null;
+    price_level: string | null; types: string | null; place_url: string | null;
+  }
+  interface ElementRow { rowid: number; name: string; type: string | null; lat: number; lon: number; place_id: string | null }
+
+  const legacy = db.prepare(
+    `SELECT rowid, name, type, lat, lon, place_id, review_count, rating, plus_code,
+            phone, website, price_level, types, place_url FROM pois
+     WHERE source = 'osm' AND (osm_key IS NULL OR osm_key = '')`
+  ).all() as LegacyRow[];
+  if (!legacy.length) return { adopted: 0, dropped: 0, conflicts: 0 };
+
+  const elements = db.prepare(
+    `SELECT rowid, name, type, lat, lon, place_id FROM pois
+     WHERE source = 'osm' AND osm_key IS NOT NULL AND osm_key <> ''`
+  ).all() as ElementRow[];
+
+  const byName = new Map<string, ElementRow[]>();
+  for (const e of elements) {
+    const k = `${foldTwinName(e.name)}\u0000${e.type ?? ''}`;
+    const list = byName.get(k) ?? [];
+    list.push(e);
+    byName.set(k, list);
+  }
+
+  const dropLegacy = db.prepare(`DELETE FROM pois WHERE rowid = ?`);
+  const adopt = db.prepare(
+    `UPDATE pois SET place_id = ?,
+       review_count = COALESCE(review_count, ?), rating = COALESCE(rating, ?),
+       plus_code = COALESCE(plus_code, ?), phone = COALESCE(phone, ?),
+       website = COALESCE(website, ?), price_level = COALESCE(price_level, ?),
+       types = COALESCE(types, ?), place_url = COALESCE(place_url, ?)
+     WHERE rowid = ?`
+  );
+
+  let adopted = 0, dropped = 0, conflicts = 0;
+  const tx = db.transaction((rows: Array<{ legacy: LegacyRow; element: ElementRow | null; conflict: boolean }>) => {
+    for (const { legacy: l, element: e, conflict } of rows) {
+      if (conflict) { conflicts++; continue; }
+      if (!e) continue;
+      if (l.place_id) {
+        // Release the identity BEFORE the element row takes it — the unique
+        // place_id index rejects the pair sharing it even for one statement.
+        dropLegacy.run(l.rowid);
+        adopt.run(l.place_id, l.review_count, l.rating, l.plus_code, l.phone,
+          l.website, l.price_level, l.types, l.place_url, e.rowid);
+        adopted++;
+      } else {
+        dropLegacy.run(l.rowid);
+        dropped++;
+      }
+    }
+  });
+
+  const plan: Array<{ legacy: LegacyRow; element: ElementRow | null; conflict: boolean }> = [];
+  for (const l of legacy) {
+    const near = (byName.get(`${foldTwinName(l.name)}\u0000${l.type ?? ''}`) ?? [])
+      .filter(e => distM(l.lat, l.lon, e.lat, e.lon) <= maxM);
+    if (near.length === 0) continue;
+    // Two element rows on the same spot with the same name is a different
+    // problem (a genuinely double-mapped element); leave it for the census.
+    if (near.length > 1) { conflicts++; continue; }
+    const e = near[0];
+    const conflict = !!e.place_id && !!l.place_id && e.place_id !== l.place_id;
+    plan.push({ legacy: l, element: conflict ? null : e, conflict });
+  }
+  tx(plan);
+  return { adopted, dropped, conflicts };
+}
+
 /** Bounding box of the Skopje urban area (the "city" for uniqueness rules). */
 const SKOPJE_BBOX = { latMin: 41.95, latMax: 42.05, lonMin: 21.35, lonMax: 21.50 };
 
@@ -315,20 +426,17 @@ export function repairFusions(db: Database.Database): { deduped: number; repoint
         AND p.osm_key IS NOT NULL AND q.rowid < p.rowid
      )`
   ).run();
-  // Legacy rows (NULL osm_key) that duplicate a properly-keyed OSM row at
-  // identical coords + same name: the keyed row carries identity potential,
-  // the legacy twin is dead weight from pre-migration imports.
-  const dedup3 = db.prepare(
-    `DELETE FROM pois WHERE rowid IN (
-       SELECT p.rowid FROM pois p
-       JOIN pois q
-         ON p.source = q.source
-        AND p.osm_key IS NULL AND q.osm_key IS NOT NULL
-        AND p.name = q.name AND p.lat = q.lat AND p.lon = q.lon
-     )`
-  ).run();
-  const deduped = dedup1.changes + dedup2.changes + dedup3.changes;
-  if (deduped) console.log(`  Deduped: ${deduped} excess rows removed`);
+  // Legacy rows (NULL osm_key) that duplicate a properly-keyed OSM row: the old
+  // statement deleted them by raw name+coordinate equality and took any
+  // place_id they carried with them. collapseGeometryTwins does the same job in
+  // the right order — the element row ADOPTS the identity, then the legacy row
+  // goes (and its 3 m tolerance catches twins the exact-equality join missed).
+  const twins = collapseGeometryTwins(db);
+  const deduped = dedup1.changes + dedup2.changes + twins.adopted + twins.dropped;
+  if (deduped) {
+    console.log(`  Deduped: ${deduped} excess rows removed ` +
+      `(${twins.adopted} identity row(s) folded into their element row)`);
+  }
 
   // --- 3. Re-heal stripped rows with the guarded pass ----------------------
   const result = identityHeal(db);
