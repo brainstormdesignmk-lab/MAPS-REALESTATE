@@ -154,20 +154,14 @@ function feedRosterSlots(
     // more — drop it and let the map scan serve the in-ring places. No centre
     // → no measurement → no claim.
     if (!near) {
-      // NO CENTRE — the FEED'S OWN DECLARATION is the only evidence left, and
-      // the ladder still owes the client a nearby answer (the owner's rule, the
-      // [16:54] capture: a street-anchor row answered «се води во населбата …
-      // пред посетата» on the FIRST ask). The roster is what the agency itself
-      // publishes for this property, so a slot whose declared distance fits the
-      // ring is served; one with NO declared distance is an unmeasured claim and
-      // stays dropped, exactly as before.
-      const declaredM = Number(e?.distance_m);
-      if (!Number.isFinite(declaredM) || declaredM > FEED_LANDMARK_MAX_M) {
-        try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre and no declared distance in ring\n`); } catch {}
-        continue;
-      }
-      seen.add(key);
-      out.push({ landmark: name, lat, lon, place_url, place_id });
+      // NO CENTRE, NO CLAIM. The roster's own `distance_m` is not evidence — it
+      // was written at import time from a centre that may never have existed
+      // (the [10:00] capture: EB 85 in Ново Лисиче led its roster with «ТЦ
+      // Мавровка», a mall in the middle of town, and the answer named it as the
+      // address). Serving the ladder's nearby slot still needs a measurable
+      // centre; the ladder's FIRST turn falls back to the honest neighbourhood
+      // line in that case (see whereIsReply), never to an unmeasured pin.
+      try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre to measure from\n`); } catch {}
       continue;
     }
     const claimM = _distM(near.lat, near.lon, lat, lon);
