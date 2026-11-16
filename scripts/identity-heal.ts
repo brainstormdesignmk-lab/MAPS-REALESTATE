@@ -41,6 +41,29 @@ import { distM } from '../src/geo/precision';
 import {
   countriesIn, countryContradiction, hasIdentityQualifier, isEmbassyName, samePlaceName,
 } from '../src/geo/offlineMap';
+import { typeRank } from '../src/geo/types';
+
+/**
+ * A TENANT NEVER INHERITS ITS VENUE'S IDENTITY.
+ *
+ * The containment tier ("Рептил" ≡ "Reptil Market br.3 Kisela Voda") is decided
+ * by DISTANCE plus a subset name, and inside a mall the tenant stands at the
+ * venue's own coordinates — 0 m is not evidence of anything there. The November
+ * 2026 sweep proved it three times: «Biser Shopping Center», «Shopping Center
+ * Lisa» and «Shopping center „Butel“» were each absorbed by the shop inside them
+ * (Anhoch Бисер, Тинекс Лиса центар, Пошта Бутел) and DELETED, so the city's
+ * malls vanished from the map — every «кај Бисер» question then answered about a
+ * travel agency. The correct pairing for a mall is photo-identical in class (the
+ * mall's own OSM row), and when that row is beyond the 40 m containment bound the
+ * honest outcome is NO merge: the Google row keeps its identity.
+ *
+ * Only the CONTAINMENT tier is vetoed. An identical token set still merges — the
+ * same name in two spellings is the same place whatever the two rows are typed.
+ */
+const VENUE_RANK = typeRank('mall');
+function tenantAbsorbsVenue(anchorType: string | null | undefined, rowType: string | null | undefined): boolean {
+  return typeRank(anchorType ?? '') >= VENUE_RANK && typeRank(rowType ?? '') < VENUE_RANK;
+}
 
 // The country lexicon, the contradiction guard and the same-place rule now live
 // in the ENGINE (src/geo/offlineMap.ts) so the map build and the runtime dedupe
@@ -71,7 +94,7 @@ export interface HealResult {
  *  OSM twin. The two are the same physical place, so the map must serve ONE
  *  entry — with the OSM (bilingual) name and Google's rating/reviews. */
 interface AnchorRow {
-  rowid: number; name: string; lat: number; lon: number; place_id: string;
+  rowid: number; name: string; type: string | null; lat: number; lon: number; place_id: string;
   review_count: number | null; rating: number | null; plus_code: string | null;
   phone: string | null; website: string | null; price_level: string | null;
   types: string | null; place_url: string | null;
@@ -81,7 +104,7 @@ export function identityHeal(db: Database.Database): HealResult {
   console.log('PHASE B2: Identity propagation (OSM ← Google anchors)');
 
   const anchors = db.prepare(
-    `SELECT rowid, name, lat, lon, place_id, review_count, rating, plus_code,
+    `SELECT rowid, name, type, lat, lon, place_id, review_count, rating, plus_code,
             phone, website, price_level, types, place_url FROM pois
      WHERE source = 'google' AND place_id IS NOT NULL`
   ).all() as AnchorRow[];
@@ -156,9 +179,9 @@ export function identityHeal(db: Database.Database): HealResult {
   let healed = 0;
 
   const rows = db.prepare(
-    `SELECT rowid, name, lat, lon, place_id FROM pois
+    `SELECT rowid, name, type, lat, lon, place_id FROM pois
      WHERE source = 'osm' AND (place_id IS NULL OR place_id = '')`
-  ).all() as Array<{ rowid: number; name: string; lat: number; lon: number; place_id: string | null }>;
+  ).all() as Array<{ rowid: number; name: string; type: string | null; lat: number; lon: number; place_id: string | null }>;
 
   for (const row of rows) {
     const rowCountries = countriesIn(row.name);
@@ -191,7 +214,7 @@ export function identityHeal(db: Database.Database): HealResult {
     if (!anchor) {
       // bbox ~±165m around the row covers every proximity bound below
       const cands = db.prepare(
-        `SELECT rowid, name, lat, lon, place_id, review_count, rating, plus_code,
+        `SELECT rowid, name, type, lat, lon, place_id, review_count, rating, plus_code,
                 phone, website, price_level, types, place_url FROM pois
          WHERE source = 'google' AND place_id IS NOT NULL
          AND lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`
@@ -204,7 +227,13 @@ export function identityHeal(db: Database.Database): HealResult {
         // hasIdentity: the ROW is un-identified by construction (the pass only
         // walks rows with no place_id) and every candidate anchor carries one —
         // that asymmetry is what licenses the containment tier.
-        if (!samePlaceName(row.name, a.name, d, false, true).same) continue;
+        const agree = samePlaceName(row.name, a.name, d, false, true);
+        if (!agree.same) continue;
+        // A TENANT IN THE SAME BUILDING IS NOT THE VENUE (see
+        // tenantAbsorbsVenue): the 0 m containment hit is a shop standing inside
+        // the mall, and merging DELETES the venue's row — three malls were lost
+        // that way on the 2026-11-16 sweep. Same-name (token) tier still merges.
+        if (agree.tier === 'subset' && tenantAbsorbsVenue(a.type, row.type)) continue;
         if (d >= bestD) continue;
         bestD = d;
         anchor = a;
