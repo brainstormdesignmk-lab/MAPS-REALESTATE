@@ -362,6 +362,16 @@ const LOCAL_PLACE_ALIASES: Array<[RegExp, string]> = [
   // listed because the Roman fold of „државна“ is „drzavna“ in either script
   // (ж and з both fold to z), so the extractor hands over «дрзавна» as often
   // as it hands over «државна».
+  // «МАЃАР» IS DELIBERATELY NOT AN ALIAS HERE (the 2026-11-16 replay): the
+  // letter table reads a keyboard's «dj» as ѓ, so «маѓар» is how «Маџар»
+  // arrives, and the map files both «Маџари» [suburb] and «Маџир Маало»
+  // [suburb] under џ. Binding it in the MAP layer — an alias to «Маџари» or a
+  // ѓ→џ fold in `soundKey` — both resolved «KAJ VAS VO MADJAR MAALO» to the
+  // suburb in ГАЗИ БАБА instead of the quarter in Центар, and the [04:14]
+  // capture came back (an Аеродром/Гази Баба anchor for a quarter the FEED
+  // knows: the area lane owns that phrase, not a POI). The gap is real and it
+  // belongs to the area vocabulary; `tests/naselba-not-a-landmark.test.ts`
+  // pins the refusal so the next attempt cannot silently re-anchor it.
   // THE HOSPITAL WORD IS OPTIONAL (the [04:47] capture): the client wrote
   // «TUKA KAJ DRZAVNA BLISKU» / «KAJ DRZAVNA», the bare adjective Skopjani use
   // for the complex, and the alias demanded «болница» — so the lookup fell
@@ -1350,18 +1360,15 @@ export function mapNameOpensWithClientWord(clientText: string, rowName: string):
 }
 
 function foldNameWords(s: string): string[] {
-  // THE SPELLING FOLD IS THE RESOLVER'S (the [07:16] «KARPOS» reading): the map
-  // writes «Карпош» and a client's keyboard writes «KARPOS» (s for ш), and the
-  // lookup binds them through `phoneticWordKeys` — so the digest's "does it bind
-  // today?" test must fold the same way or it calls a name that RESOLVES a gap
-  // forever. Per-word, with the Cyrillic fold as the fallback for a word too
-  // short to carry a phonetic key («УЈП» is three letters and survives, «Ц»
-  // would not).
-  const fold = (w: string): string => {
-    if (/^\d+$/u.test(w)) return w;
-    const k = phoneticWordKeys(w);
-    return k[0] ?? w.toLowerCase();
-  };
+  // THE SPELLING FOLD IS THE APP'S OWN WORD KEY (the [07:16] «KARPOS» and the
+  // [11:0x] «БРОЗ КАФЕ» readings): the digest asks "does this name bind today?"
+  // about the same map the handler asks about, so it must fold with
+  // `canonicalWordKey` — the key the handler's coverage guard and the map's
+  // variant pass already use. `phoneticWordKeys` was close but not the same
+  // key: it split «кафе» from the map's «cafe» (the sound skeletons agree, the
+  // phonetic ones do not), so a name that RESOLVES stayed a "map gap" forever.
+  // Per word, digits kept verbatim («Карпош 3» ≠ «Карпош»).
+  const fold = (w: string): string => (/^\d+$/u.test(w) ? w : (canonicalWordKey(w) || w.toLowerCase()));
   return toCyrillic(s).toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ')
     .filter(Boolean).map(fold);
 }
@@ -3276,6 +3283,11 @@ export class OfflineMapStore {
       if (!t || t.length < 3) continue;
       try {
         const hit = this.findPoiByName(t);
+        // THE MAP'S OWN ALIAS TABLE VOUCHES (see LOCAL_PLACE_ALIASES): a
+        // colloquial spelling the table knows IS the client's name for that
+        // place, so the coverage guard does not apply — it is not a fuzzy guess.
+        // «ВОЕНА БОЛНИЦА» → «ГОБ 8-ми Септември» is exactly this case.
+        if (hit && officialPlaceName(t) === hit.name) return { name: hit.name, type: hit.type };
         if (hit && mapNameCoversClientWords(t, hit.name)) return { name: hit.name, type: hit.type };
       } catch { /* a digest probe may never break the caller */ }
     }
