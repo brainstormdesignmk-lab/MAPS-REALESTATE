@@ -1070,6 +1070,9 @@ const LEXICON_WORDS: Record<string, string> = {
   katedrala: 'cathedral', crkven: 'church',
   muzej: 'museum', muzei: 'museum', teatar: 'theatre', pozoriste: 'theatre',
   stadion: 'stadium', arena: 'stadium',
+  // «ТЦ»/«TC» is the same class word as «мол» — a client writes the shopping
+  // centre either way («TC DZEVAHIR», «ТЦ Капитол»), and the phonetic pass
+  // keys its class rank off this table.
   mol: 'mall', trgovski: 'shopping', market: 'market', pazara: 'market', pazar: 'market',
   apoteka: 'pharmacy', apoteki: 'pharmacy',
   hotel: 'hotel', hoteli: 'hotel', motel: 'motel',
@@ -3262,6 +3265,33 @@ export class OfflineMapStore {
         if (phoneticRows.length > 0) {
           const extra = (r: PoiIndexRow): number => this.phoneOf(r).length - wantSet.size;
           const wholeName = (r: PoiIndexRow): number => this.wholeNameOf(clean, r.name);
+          // A CLASS WORD THE CLIENT SAID IS THE ROW'S TYPE, NOT A QUALIFIER (the
+          // [16:41] «TC DZEVAHIR» family): the complex's four residential towers
+          // («Џевахир кула А/Б/Ц/Д») are each one word closer to the phrase than
+          // the shopping centre, so the fewest-extra-words order below answered
+          // a tower to a client who had named the MALL — and named it with its
+          // own class word. When the phrase carries a class word the lexicon
+          // knows («ТЦ»/«TC»/«мол» → mall, «банка» → bank), a row whose TYPE
+          // declares that class answers first. That is the same contract as
+          // «the mall is the landmark, not the shop inside it» ([11:54]).
+          // A SMALL, LOCAL TABLE — LEXICON_WORDS is the row-side vocabulary and
+          // adding «ТЦ»/«ТС» to it would strip the word out of every map name
+          // that starts with it (it is consulted when a row's words are folded),
+          // which silently re-ordered the «DAJMOND MOL» tie-break.
+          const CLASS_WORD_TYPES = new Set(['tc', 'тц', 'mol', 'мол', 'mall']);
+          const classTypes = new Set<string>(
+            clean.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean)
+              .filter(w => CLASS_WORD_TYPES.has(w)).map(() => 'mall'));
+          // ONLY A BUILDING ROW IS DEMOTED — never a place of another venue
+          // class: «DAJMOND MOL» has two rows of the SAME mall («Diamond Mall»
+          // and «ТЦ Дајмонд») and which one answers must stay the old tie-break,
+          // while the Џевахир TOWERS are `residential` rows named after a mall
+          // that stands 100 m away.
+          const NON_VENUE_TYPE = /residential|apartment|^yes$|^place$|building|^house$|construction|garage/;
+          const classRank = (r: PoiIndexRow): number => {
+            if (classTypes.size === 0) return 0;
+            return NON_VENUE_TYPE.test(normType(r.type ?? '')) ? 1 : 0;
+          };
           // Same tie-breaks as the substring pass above (fewest extra words,
           // then the AREA before a POI named after it, then the nearest branch,
           // then the SHORTER name), so the SAME place answers for either
@@ -3269,7 +3299,8 @@ export class OfflineMapStore {
           // (the client's) must not name two different churches — and «KARPOS
           // 3» names the naselba, not the mall of the same name.
           phoneticRows.sort((a, b) =>
-            extra(a) - extra(b)
+            classRank(a) - classRank(b)
+            || extra(a) - extra(b)
             || (wholeName(a) - wholeName(b))
             || (isSettlementType(a.type) ? 0 : 1) - (isSettlementType(b.type) ? 0 : 1)
             || (center

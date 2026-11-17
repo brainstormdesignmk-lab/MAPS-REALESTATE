@@ -473,3 +473,36 @@ test('miss-recovery allows one slip per word, never a different shape', () => {
   assert.equal(store.findPoiByNameLoose('Воена болнице'), undefined);
   store.close();
 });
+
+test('a class word the client says picks the venue, not a building named after it', () => {
+  // THE [16:41] CAPTURE: «TC DZEVAHIR». The complex's four residential towers
+  // are each ONE WORD closer to the phrase than the shopping centre itself, so
+  // the fewest-extra-words order answered «Џевахир кула Д» — a tower — while
+  // the mall stood 100 m away. The phrase carries the class word «TC», so a row
+  // whose type declares the mall answers first (same contract as «the mall is
+  // the landmark, not the shop inside it»). A BUILDING row (`residential`, the
+  // bare OSM `yes`/`place` fragments) is the only kind that yields, so the
+  // two-rows-of-one-mall tie («Diamond Mall» / «ТЦ Дајмонд») is untouched.
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'ТЦ Џевахир - Скопје', type: 'mall', lat: 41.9797, lon: 21.4662 },
+    { name: 'Џевахир кула А', type: 'residential', lat: 41.9801, lon: 21.4648 },
+    { name: 'Џевахир кула Б', type: 'residential', lat: 41.9800, lon: 21.4657 },
+    { name: 'Џевахир кула Д', type: 'residential', lat: 41.9801, lon: 21.4667 },
+    { name: 'Џевахир кула Ц', type: 'residential', lat: 41.9806, lon: 21.4663 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  // Both the phrase that carries the class word («TC») and the map's own name
+  // must reach the mall. («Dzevahir mol» deliberately is NOT here: the map has
+  // no row holding the word «мол» for this complex, and the every-word rule
+  // makes that an honest MISS in a fixture — on the shipped map the Google row
+  // «Cevahir Mall» carries it.)
+  for (const q of ['TC DZEVAHIR', 'ТЦ Џевахир']) {
+    assert.equal(store.findPoiByName(q)?.name, 'ТЦ Џевахир - Скопје',
+      `${q} names the mall, never one of its residential towers`);
+  }
+  // …and with NO class word the tower rows are still reachable (the class rule
+  // only orders the answer, it never hides a place).
+  assert.match(store.findPoiByName('Џевахир кула Д')?.name ?? '', /Џевахир кула Д/u);
+  store.close();
+});
