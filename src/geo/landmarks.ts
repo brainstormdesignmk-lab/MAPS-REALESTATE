@@ -65,6 +65,9 @@ export interface PropertyRow {
   landmark_name?: string | null;
   geo_source?: string | null;   // 'stored'|'google_cached'|'osm_low_confidence'
   address?: string;
+  /** The naselba the row names — the anchor a re-resolved centre must not
+   *  contradict (see `resolveSearchCenter` and `pinContradictsLocation`). */
+  location?: string;
   lat?: number | null;
   lon?: number | null;
   /** Feed description text — present only when callers pass the full
@@ -358,12 +361,20 @@ export function resolveSearchCenter(p: PropertyRow): SearchCenter {
   // building point is a confirmed building point, whatever the feed's label
   // says about it.
   const building = _offlineMapRef?.resolvePropertyOffline(p.address ?? '');
-  if (building?.trusted && building.lat != null && building.lon != null) {
+  // A MAP RESOLUTION THAT LANDS IN ANOTHER QUARTER IS NOT AN IMPROVEMENT (the
+  // EB 85 class, the read side): the row's address «КАЈ БРАНКА» is a local
+  // name, not a street, and the resolver fuzzy-matched it to a bank near the
+  // town centre — 3,5 km from the Ново Лисиче the row itself names. Every
+  // candidate centre is now tested against that naselba before it is used, so
+  // the read side cannot walk back into the wound the FEED audit repairs.
+  const contradicts = (lat: number, lon: number): boolean =>
+    pinContradictsLocation(_offlineMapRef, { location: p.location, lat, lon });
+  if (building?.trusted && building.lat != null && building.lon != null && !contradicts(building.lat, building.lon)) {
     const mismatchM = p.lat && p.lon ? _distM(p.lat, p.lon, building.lat, building.lon) : undefined;
     return { lat: building.lat, lon: building.lon, trusted: true, source: 'map', mismatchM };
   }
   const osm = _offlineMapRef?.geocodeAddress(p.address ?? '');
-  if (osm) return { lat: osm.lat, lon: osm.lon, trusted: false, source: 'geocode' };
+  if (osm && !contradicts(osm.lat, osm.lon)) return { lat: osm.lat, lon: osm.lon, trusted: false, source: 'geocode' };
   return { lat: 0, lon: 0, trusted: false, source: 'none' };
 }
 
@@ -640,6 +651,39 @@ export function anchorWordForms(word: string): string[] {
     }
   }
   return [...new Set(out)];
+}
+
+/** THE PIN/AREA CONTRADICTION, as one predicate.
+ *
+ *  Two machine facts are compared: the map's nearest quarter to the pin, and
+ *  the map's position for the naselba NAME. A healthy row has them beside each
+ *  other (a Центар flat's pin sits 148 m from the «Центар» row); the [05:32]
+ *  capture had «Ново Лисиче» 3,4 km from a pin that stands 331 m from «Пајко
+ *  Маало». The margin (1,5 km) is wide on purpose: a quarter inside a district
+ *  («Буњаковец» inside «Центар») is the same place described at another
+ *  granularity, and must never count as a contradiction.
+ *
+ *  Lives at module level because TWO readers ask it: `enrich` (drop the
+ *  landmark line before a card can print it) and `scripts/audit-pin-location.ts`
+ *  (report the broken FEED rows, which no card-side guard can repair). A single
+ *  predicate means the audit never lists a row the served card accepts, and the
+ *  card never contradicts a row the audit calls healthy. */
+export function pinContradictsLocation(
+  map: OfflineMapStore | undefined,
+  pr: { location?: string; lat?: number | null; lon?: number | null },
+): boolean {
+  if (!map?.available) return false;
+  const lat = pr.lat, lon = pr.lon;
+  if (typeof lat !== 'number' || typeof lon !== 'number' || !lat || !lon) return false;
+  const named = stripPoiAnnotation(String(pr.location ?? '')).replace(/\s*\([^)]*\)\s*$/u, '').trim();
+  if (!named) return false;
+  try {
+    const near = map.areaAt(lat, lon, 3000);
+    const place = map.findPoiByName(named, { lat, lon });
+    if (!near || !place) return false;
+    const d = _distM(lat, lon, place.lat, place.lon);
+    return Number.isFinite(d) && d > near.distance_m + 1500;
+  } catch { return false; }
 }
 
 export class LandmarkService {
@@ -945,35 +989,52 @@ export class LandmarkService {
       // resolver measures from the coordinates, which is what is wrong here).
       const l = contradictory ? { landmark: '', type: '', source: 'none' as const } : await this.resolve(pr);
       if (l.source !== 'none') pr.landmark = l.landmark;
+      // A FEED ROSTER THAT NO LONGER MEASURES IS STALE, NOT AUTHORITATIVE (the
+      // read side of the EB 85 repair): moving the row's centre to its own
+      // quarter left the import-time roster — «ТЦ Мавровка» + «MOS» + «Амбасада
+      // на Јапонија», all 3,5 km away — sitting on the row. Consumers read the
+      // roster FIRST, so `nearbyLandmarks` must reject it (it does, entry by
+      // entry) and the card must not fall back to `landmark` (it would have
+      // printed «во близина на ТЦ Мавровка» from the stale string). Both are
+      // cleared here so every reader sees the same honest state: the row keeps
+      // its naselba, its landmark line waits for the master's next roster pass.
+      if ((pr.landmarks?.length ?? 0) > 0) {
+        // ONLY A MEASUREMENT CAN WITHDRAW A ROSTER. No centre (a bare fixture,
+        // a row with no coordinates, a map that cannot place it) means nothing
+        // was compared — the roster stays, and the READ side already refuses to
+        // print an entry it cannot measure (feedRosterSlots).
+        const resolved = resolveSearchCenter(pr as PropertyRow);
+        const usable = (c: { lat: number; lon: number }): boolean =>
+          (c.lat !== 0 || c.lon !== 0) && Number.isFinite(c.lat) && Number.isFinite(c.lon);
+        // THE STORED PIN IS A RULER TOO: when the resolver refuses the row's
+        // address (EB 85's «КАЈ БРАНКА»), the row's own coordinates still say
+        // where the flat is supposed to be — enough to ask whether a roster
+        // entry is anywhere near the ring. It is NOT used for a claim, only for
+        // this comparison.
+        const ruler = usable(resolved)
+          ? resolved
+          : (typeof pr.lat === 'number' && typeof pr.lon === 'number' ? { lat: pr.lat, lon: pr.lon } : undefined);
+        const measurable = !!ruler && this.opts.offlineMap?.available === true;
+        const measured = measurable
+          ? feedRosterSlots(pr as PropertyRow, this.opts.offlineMap, ruler! as never)
+          : undefined;
+        if (measured !== undefined && measured.length === 0) {
+          delete pr.landmarks;
+          pr.landmark = undefined;
+          try { dbgLog(`[${new Date().toISOString()}] EB ${pr.eb}: FEED ROSTER STALE (no entry measures from the row's own centre) — landmark line withdrawn\n`); } catch {}
+        }
+      }
       try { dbgLog(
         `[${new Date().toISOString()}] EB ${pr.eb}: resolved=${l.landmark} source=${l.source} addr=${JSON.stringify(pr.address?.substring(0, 40))}\n`); } catch {}
     }));
   }
 
   /** Does the row's own PIN sit somewhere other than the naselba its
-   *  `location` field names?
-   *
-   *  Two machine facts are compared: the map's nearest quarter to the pin, and
-   *  the map's position for the naselba NAME. A healthy row has them beside each
-   *  other (a Центар flat's pin sits 148 m from the «Центар» row); the [05:32]
-   *  capture had «Ново Лисиче» 3,4 km from a pin that stands 331 m from «Пајко
-   *  Маало». The margin (1,5 km) is wide on purpose: a quarter inside a district
-   *  («Буњаковец» inside «Центар») is the same place described at another
-   *  granularity, and must never count as a contradiction. */
+   *  `location` field names? See `pinContradictsLocation` (module-level) — the
+   *  same predicate guards `enrich` and the feed audit, so the served card and
+   *  the report can never disagree about which rows are broken. */
   private pinContradictsLocation(pr: { location?: string; lat?: number | null; lon?: number | null }): boolean {
-    const map = this.opts.offlineMap;
-    if (!map?.available) return false;
-    const lat = pr.lat, lon = pr.lon;
-    if (typeof lat !== 'number' || typeof lon !== 'number' || !lat || !lon) return false;
-    const named = stripPoiAnnotation(String(pr.location ?? '')).replace(/\s*\([^)]*\)\s*$/u, '').trim();
-    if (!named) return false;
-    try {
-      const near = map.areaAt(lat, lon, 3000);
-      const place = map.findPoiByName(named, { lat, lon });
-      if (!near || !place) return false;
-      const d = _distM(lat, lon, place.lat, place.lon);
-      return Number.isFinite(d) && d > near.distance_m + 1500;
-    } catch { return false; }
+    return pinContradictsLocation(this.opts.offlineMap, pr);
   }
 
   /** Returns the top 3 nearby landmarks with coordinates for rotation.
