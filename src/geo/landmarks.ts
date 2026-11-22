@@ -919,16 +919,61 @@ export class LandmarkService {
    *  reply builder (cards, LLM context, where-is, availability). */
   async enrich(props: Array<{ id?: number; eb: number; address?: string; location?: string; details?: string; landmark?: string; landmarks?: FeedLandmark[]; geo_source?: string | null; lat?: number | null; lon?: number | null }>): Promise<void> {
     await Promise.all(props.map(async pr => {
+      // THE CARD MUST NOT CONTRADICT ITSELF (the [05:32] capture): «Станот под
+      // Евидентен број 85 е трисобен стан во Ново Лисиче. Се наоѓа во близина
+      // на ТЦ Мавровка.» — the row's `location` names one neighbourhood and its
+      // OWN PIN sits 3,4 km away from it, next to the mall. The landmark list is
+      // derived from the pin, so when the pin and the naselba text disagree the
+      // landmark line is not evidence about where the flat is: it is half of a
+      // contradiction. The FEED ROW must be corrected by the operator (the
+      // report names it); until then the card keeps the naselba and drops the
+      // landmark, so it can never print a mall from another part of town.
+      const contradictory = this.pinContradictsLocation(pr);
+      if (contradictory) {
+        delete pr.landmarks;
+        pr.landmark = undefined;
+        try { dbgLog(`[${new Date().toISOString()}] EB ${pr.eb}: LOCATION/PIN MISMATCH (${pr.location} vs the pin's own quarter) — landmark line dropped\n`); } catch {}
+      }
       // Feed landmarks from Supabase (ANA's import-time resolution) are
       // authoritative — never override them. But ALWAYS re-resolve for all
       // other cases: the DB cache (sub-ms) handles performance, and skipping
       // based on pr.landmark causes stale results when the PropertyService
       // caches a mutated property object for 5 minutes.
-      const l = await this.resolve(pr);
+      //
+      // …EXCEPT a row whose pin contradicts its own naselba: re-resolving from
+      // that pin would mint exactly the landmark the guard just dropped (the
+      // resolver measures from the coordinates, which is what is wrong here).
+      const l = contradictory ? { landmark: '', type: '', source: 'none' as const } : await this.resolve(pr);
       if (l.source !== 'none') pr.landmark = l.landmark;
       try { dbgLog(
         `[${new Date().toISOString()}] EB ${pr.eb}: resolved=${l.landmark} source=${l.source} addr=${JSON.stringify(pr.address?.substring(0, 40))}\n`); } catch {}
     }));
+  }
+
+  /** Does the row's own PIN sit somewhere other than the naselba its
+   *  `location` field names?
+   *
+   *  Two machine facts are compared: the map's nearest quarter to the pin, and
+   *  the map's position for the naselba NAME. A healthy row has them beside each
+   *  other (a Центар flat's pin sits 148 m from the «Центар» row); the [05:32]
+   *  capture had «Ново Лисиче» 3,4 km from a pin that stands 331 m from «Пајко
+   *  Маало». The margin (1,5 km) is wide on purpose: a quarter inside a district
+   *  («Буњаковец» inside «Центар») is the same place described at another
+   *  granularity, and must never count as a contradiction. */
+  private pinContradictsLocation(pr: { location?: string; lat?: number | null; lon?: number | null }): boolean {
+    const map = this.opts.offlineMap;
+    if (!map?.available) return false;
+    const lat = pr.lat, lon = pr.lon;
+    if (typeof lat !== 'number' || typeof lon !== 'number' || !lat || !lon) return false;
+    const named = stripPoiAnnotation(String(pr.location ?? '')).replace(/\s*\([^)]*\)\s*$/u, '').trim();
+    if (!named) return false;
+    try {
+      const near = map.areaAt(lat, lon, 3000);
+      const place = map.findPoiByName(named, { lat, lon });
+      if (!near || !place) return false;
+      const d = _distM(lat, lon, place.lat, place.lon);
+      return Number.isFinite(d) && d > near.distance_m + 1500;
+    } catch { return false; }
   }
 
   /** Returns the top 3 nearby landmarks with coordinates for rotation.
