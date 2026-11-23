@@ -1723,16 +1723,28 @@ export type PlaceAgreementTier = 'token' | 'sound' | 'subset' | 'embassy' | 'non
  *  evidence that two names describe one place: «Caffe Skopje» folds to exactly
  *  {caffe}, and the containment tier then accepted ANY café whose name contains
  *  «Coffee» within 40 m — the review pass surfaced it as «Caffe Skopje» ≡ «The
- *  Dude Specialty Coffee». A name made only of such words carries no identity
- *  at all, so it stays out of every tier that needs one distinctive word. */
-export const GENERIC_VENUE_TOKENS = new Set([
-  'kafe', 'caffe', 'cafe', 'coffee', 'kafic', 'kafana', 'bar', 'pub', 'restoran', 'restaurant',
+ *  Dude Specialty Coffee», and the same hole bound the anonymous OSM «Mosque»
+ *  row to «Mustafa Pasha Mosque» 266 m away. A name made only of such words
+ *  carries no identity at all, so it stays out of every tier that needs one.
+ *
+ *  ONE VOCABULARY, TWO GATES: this is the street guard's institution list (a
+ *  row named «ЦРНОГОРСКА АМБАСАДА» is not a street) plus the venue words a
+ *  street name never contains but a business name often is entirely made of.
+ *  The two gates answer the same question — "is this word a NAME or a KIND?" —
+ *  so they must never drift apart. */
+export const GENERIC_VENUE_TOKENS: ReadonlySet<string> = new Set([
+  ...STREET_INSTITUTION_WORDS,
   'market', 'marketa', 'marketi', 'supermarket', 'mall', 'mol', 'shop', 'prodavnica', 'butik',
   'boutique', 'store', 'hotel', 'motel', 'hostel', 'bank', 'banka', 'apteka', 'apoteka',
   'pharmacy', 'bolnica', 'hospital', 'klinika', 'clinic', 'ambulanta', 'skola', 'school',
   'uciliste', 'fakultet', 'pazar', 'pazare', 'pazarce', 'pekara', 'bakery', 'pizzeria', 'pizza',
-  'grill', 'kebab', 'burek', 'klub', 'club', 'lounge', 'office', 'kancelarija', 'park', 'parking',
-  'garaza', 'stanica', 'station', 'terminal', 'aerodrom', 'sportska', 'sportski', 'stadion',
+  'grill', 'kebab', 'burek', 'klub', 'club', 'lounge', 'kafe', 'caffe', 'cafe', 'coffee', 'kafic',
+  'restoran', 'restaurant', 'kafana', 'bar', 'pub', 'park', 'parking', 'garaza', 'stanica',
+  'station', 'terminal', 'aerodrom', 'sportski', 'sportska', 'stadion', 'stadium', 'settlement', 'naselba',
+  // Not in the street guard (a street is never «офис»), but the same KIND class
+  // for the identity tiers — dropping them while composing the set would have
+  // quietly re-opened the «Corporate office» hole.
+  'office', 'kancelarija',
 ]);
 
 /** The ONE distinctive token a containment needs: long enough to be a name, and
