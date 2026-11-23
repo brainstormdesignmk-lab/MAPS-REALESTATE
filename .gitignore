@@ -24,3 +24,5 @@ map-deploy-*.tar.gz
 
 # Backfill refusal ledger — machine state (rowids of THIS map build), not the map.
 data/identity-backfill-misses*.json
+# Generated review of the backfill refusals (data/identity-class-review.md).
+data/identity-class-review.md

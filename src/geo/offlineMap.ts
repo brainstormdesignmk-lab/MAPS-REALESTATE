@@ -1041,6 +1041,76 @@ export function streetKey(s: string): string {
   return toLatin(normalizeStreet(s));
 }
 
+// ── IS THIS A STREET AT ALL? (the learned-anchor write guard) ───────────────
+// `learnStreet`/`learnAddress` plant rows the resolver later TRUSTS, so a key
+// that is not a street becomes a permanent lie in the address layer: the 2026
+// map carried seventeen learned anchors, and seven of them were landmark
+// phrases from old runs — «ШАМПИОНЧЕ КАК КИПЕР МАРКЕТ», «ЦРНОГРАДСКА
+// АМБАСАДА», «КАЈ СИТИ МОЛ ' РУСКИТЕ ЗГРАДИ», «оу Лазо Ангеловски», a bare
+// «Boulevard». The docstring always claimed the writer refused them; the code
+// never had the check. This is the check, and the prune script uses the SAME
+// predicate, so the map can never disagree with the gate that built it.
+//
+// What it does NOT refuse: an address given by QUARTER («Буњаковец 5», «Козле
+// 12», «Чаир 3») — that is a real Skopje address form, and the learned anchor
+// is exactly what resolves it offline. Those rows stay; the class removed here
+// is a landmark/business phrase standing where a street name belongs.
+
+export interface StreetKeyVerdict {
+  streetLike: boolean;
+  /** Why it was refused — the operator reads this in the prune report. */
+  reason?: 'empty' | 'no-letters' | 'generic-word' | 'landmark-opener' | 'institution-word';
+}
+
+/** Words that introduce a LANDMARK, never a street: «КАЈ БРАНКА», «ШАМПИОНЧЕ
+ *  КАК КИПЕР МАРКЕТ», «ЃОРЧЕ КАЈ ПАЗАРЧЕТО». A street name does not say where
+ *  something is relative to something else. */
+const STREET_OPENER_WORDS = new Set([
+  'kaj', 'kak', 'kako', 'sproti', 'nasproti', 'blizu', 'okolu', 'kraj', 'kon', 'do', 'vo',
+  'at', 'near', 'behind', 'opposite', 'beside', 'next', 'across', 'around',
+]);
+
+/** Institutions, businesses and landmarks — a row named after one is not a
+ *  street. Matched as a FOLDED WHOLE WORD, so «Црногораска» never trips
+ *  «црква» and «Пазарна» never trips «пазар». */
+const STREET_INSTITUTION_WORDS = new Set([
+  'ambasada', 'ambasadi', 'embassy', 'embasy', 'konzulat', 'consulate',
+  'mol', 'mall', 'market', 'marketi', 'supermarket', 'trgovski', 'trgovina', 'prodavnica',
+  'apteka', 'apoteka', 'pharmacy', 'bolnica', 'hospital', 'klinika', 'clinic', 'ambulanta',
+  'uciliste', 'uchiliste', 'school', 'skola', 'gimnazija', 'fakultet', 'faculty', 'univerzitet',
+  'oou', 'ou', 'sou', 'dptu', 'guc', 'dgu', 'azc', 'jpu',
+  'crkva', 'church', 'dzamija', 'mosque', 'manastir', 'monastery', 'sinagoga',
+  'hotel', 'motel', 'hostel', 'restoran', 'restaurant', 'kafe', 'cafe', 'kafana', 'bar',
+  'stanica', 'station', 'avtobuska', 'zeleznicka', 'aerodrom', 'terminal',
+  'pazar', 'pazare', 'pazarce', 'marketplace', 'banka', 'bank', 'gradska', 'opstina',
+  'sportski', 'stadion', 'stadium', 'parking', 'garaza',
+]);
+
+/** A bare generic street word with no name of its own («Boulevard»). */
+const STREET_GENERIC_WORDS = new Set([
+  'bulevar', 'boulevard', 'ulica', 'ul', 'street', 'pat', 'put', 'avenue', 'avenija',
+]);
+
+/** Is this string a STREET NAME (what the address layer may learn), or a
+ *  landmark/business phrase that must never earn an anchor? */
+export function assessStreetKey(name: string): StreetKeyVerdict {
+  const raw = cleanStreetName(String(name ?? ''));
+  // The trailing house number is not part of the judgement.
+  const bare = raw.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[a-z]+))*\s*$/i, '').trim();
+  if (!bare) return { streetLike: false, reason: 'empty' };
+  const words = toLatin(bare).toLowerCase().replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length) return { streetLike: false, reason: 'no-letters' };
+  if (words.every(w => STREET_GENERIC_WORDS.has(w))) return { streetLike: false, reason: 'generic-word' };
+  for (const w of words) {
+    // „до“ / „во“ only open a landmark phrase when they are NOT the whole name
+    // (a street called «До» does not exist, but a name is never one word long
+    // here unless it is generic, which the rule above already caught).
+    if (STREET_OPENER_WORDS.has(w) && words.length > 1) return { streetLike: false, reason: 'landmark-opener' };
+    if (STREET_INSTITUTION_WORDS.has(w)) return { streetLike: false, reason: 'institution-word' };
+  }
+  return { streetLike: true };
+}
+
 /** Cyrillic → Latin transliteration, for tolerant name comparison. */
 /** Cyrillic → Latin spelling (the display/matching form: ж → zh, ч → ch).
  *  The table is module-level: it was re-allocated on every call, and this is
@@ -1244,8 +1314,10 @@ export function loadNameVariants(pairs: Iterable<[string, string]>): void {
   const t: Record<string, string> = { ...NAME_VARIANT_SEED };
   for (const [from, to] of pairs) if (from && to && from !== to) t[from] = to;
   NAME_VARIANTS = t;
-  // The canonical-key memo bakes the variant table into its answers.
+  // The canonical-key and identity-token memos bake the variant table into
+  // their answers.
   CANON_CACHE.clear();
+  IDENTITY_TOKENS_CACHE.clear();
 }
 /** The canonical key of ONE folded word (``toLatin``+c→k space). Unknown words
  *  are their own key, so this fold can only ever MERGE spellings, never invent
@@ -1369,6 +1441,13 @@ export const IDENTITY_NOISE = new Set([
   // so they carry no identity — and the Kipper protection still holds, because
   // "Kipper" vs "Kipper Market - Butel" keeps the neighbourhood token 'butel'.
   'mall', 'tc', 'trgovski', 'shopping', 'shop', 'center', 'centre', 'centar',
+  // THE CITY'S OWN NAME. The map covers one city, so „Skopje“ in a name says
+  // where a place is, never WHICH place it is: „Skopje City Mall“ and „Сити
+  // Мол“ are one mall, and the extra word made their token sets different
+  // sizes, so the sound tier could not compare them (the EB 48 roster held
+  // both, 44 m apart). «Скопје Север» keeps its identity in „sever“.
+  // (translitToLatin has already folded «Скопје» to this spelling.)
+  'skopje',
   // INSTITUTIONAL ABBREVIATIONS — the same school across two sources:
   // "ООУ Лазо Ангеловски" and "ОУ Лазо Ангеловски" (основно/општинско училиште).
   'oou', 'ou', 'sou', 'ju', 'jp', 'ad', 'doo', 'dptu', 'guc', 'dgu', 'azc',
@@ -1380,7 +1459,21 @@ export const IDENTITY_NOISE = new Set([
 export const IDENTITY_QUALIFIER = /residence|consular|consulate|section|annex|depot/i;
 
 /** Identity tokens: canonical, noise-free, DIGITS PRESERVED, order ignored. */
+// THE FOLD IS PAID ONCE PER NAME. `samePlacePoi` runs the fold on BOTH names of
+// every pair it tests, and in a dense 500 m window that is hundreds of
+// thousands of pairs per call — measured 55 µs per pair, 8.8 s for one city-
+// centre lookup (2026-11-23). The answer is a pure function of the name, so it
+// is memoised; the map's 6 000 names have ~9 500 distinct words, not millions.
+// The cached array is FROZEN: a caller that sorts it in place would silently
+// poison every later answer (`loadNameVariants` clears both this and the word
+// cache, since the table changes the fold's output).
+const IDENTITY_TOKENS_CACHE = new Map<string, readonly string[]>();
+const IDENTITY_TOKENS_CACHE_MAX = 50000;
+
 export function identityTokens(name: string): string[] {
+  const cacheKey = String(name ?? '');
+  const hit = IDENTITY_TOKENS_CACHE.get(cacheKey);
+  if (hit) return hit as string[];
   let t = translitToLatin(name)
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -1394,7 +1487,10 @@ export function identityTokens(name: string): string[] {
     if (!canon || IDENTITY_NOISE.has(canon)) continue;
     out.push(canon);
   }
-  return out;
+  const frozen = Object.freeze(out);
+  if (IDENTITY_TOKENS_CACHE.size >= IDENTITY_TOKENS_CACHE_MAX) IDENTITY_TOKENS_CACHE.clear();
+  IDENTITY_TOKENS_CACHE.set(cacheKey, frozen);
+  return frozen as string[];
 }
 
 /** Unordered, noise-free identity key (digits kept). */
@@ -1549,6 +1645,11 @@ export function placeLookupTokens(name: string): string[] {
 export const IDENTITY_TOKEN_RADIUS = 120;  // same token set (order-insensitive)
 export const IDENTITY_SUBSET_RADIUS = 40;  // one name contained in the other
 export const IDENTITY_EMBASSY_RADIUS = 200; // same country, one in-city embassy
+/** SAME NAME, DIFFERENT SCRIPT/SPELLING — the sound-key radius. Short on
+ *  purpose: a transliteration bridge is evidence of ONE name, never of a
+ *  location, so it may only ever explain two rows standing on one building
+ *  (the Сити Мол / City Mall case is 42 m — two OSM nodes of one mall). */
+export const IDENTITY_SOUND_RADIUS = 45;
 
 /** Countries our lexicon can recognize in landmark names. Keys are the
  *  normalized/canonical word forms (post-transliteration, post-lexicon).
@@ -1615,7 +1716,53 @@ export function hasIdentityQualifier(name: string): boolean {
   return IDENTITY_QUALIFIER.test(identityTokens(name).join(' ')) || IDENTITY_QUALIFIER.test(name);
 }
 
-export type PlaceAgreementTier = 'token' | 'subset' | 'embassy' | 'none';
+export type PlaceAgreementTier = 'token' | 'sound' | 'subset' | 'embassy' | 'none';
+
+/** THE SOUND SKELETON OF ONE IDENTITY TOKEN. `identityTokens` already folds
+ *  SCRIPT (кийрилица → Latin) but not SPELLING, so «Рамстор»/«Ramstore» and
+ *  «Сити»/«City» were still two different keys. `canonicalWordKey` is the map's
+ *  own fold for exactly that — the one the name lookup binds with — so this
+ *  tier cannot disagree with a lookup about what one word sounds like. */
+function soundKeyOf(token: string): string {
+  // A NUMBER IS NEVER A SOUND: the skeleton drops vowels, so «15а» folded to
+  // «15» and two neighbouring buildings became one (the map holds
+  // «Варшавска 15» and «Варшавска 15а» 5 m apart). House numbers compare
+  // verbatim — the same reason the token rule keeps digits.
+  if (/\d/.test(token)) return token;
+  return canonicalWordKey(token);
+}
+
+/** One-to-one: every token of `a` sounds like a DIFFERENT token of `b`. Used
+ *  only for EQUAL-SIZE sets (a spelling of one name, never a branch added). */
+function soundBijection(a: Set<string>, b: Set<string>): boolean {
+  if (a.size === 0 || a.size !== b.size) return false;
+  const used = new Set<string>();
+  for (const t of a) {
+    const k = soundKeyOf(t);
+    if (!k) return false;
+    let hit: string | undefined;
+    for (const u of b) if (!used.has(u) && soundKeyOf(u) === k) { hit = u; break; }
+    if (!hit) return false;
+    used.add(hit);
+  }
+  return true;
+}
+
+/** Every token of `small` sounds like a different token of `large` — the same
+ *  containment test as the subset tier, for a name written in another script. */
+function soundContained(small: Set<string>, large: Set<string>): boolean {
+  if (small.size === 0 || small.size > large.size) return false;
+  const used = new Set<string>();
+  for (const t of small) {
+    const k = soundKeyOf(t);
+    if (!k) return false;
+    let hit: string | undefined;
+    for (const u of large) if (!used.has(u) && soundKeyOf(u) === k) { hit = u; break; }
+    if (!hit) return false;
+    used.add(hit);
+  }
+  return true;
+}
 export interface PlaceAgreement { same: boolean; tier: PlaceAgreementTier }
 
 /**
@@ -1625,15 +1772,21 @@ export interface PlaceAgreement { same: boolean; tier: PlaceAgreementTier }
  *            within IDENTITY_TOKEN_RADIUS. "Амбасада на Турција" ≡
  *            "Embassy of Republic of Turkey"; "Амбасада на Република Чешка" ≡
  *            "Embassy of the Czech Republic"; "Бит Пазар 1" ≠ "Бит Пазар 2".
+ *   sound  — the SAME token set after spelling/script folding, within
+ *            IDENTITY_SOUND_RADIUS. "Маркет Рамстор" ≡ "Market Ramstore"
+ *            (ramstor/ramstore), "Сити Мол" ≡ "Skopje City Mall" (siti/city
+ *            → st, the city word carries no identity), while a pharmacy and
+ *            the shop beside it stay apart because their names do not sound
+ *            alike — this tier bridges a SPELLING, never a distance.
  *   subset — one token set contained in the other within IDENTITY_SUBSET_RADIUS,
- *            the smaller side carrying ≥1 distinctive (≥4-char) token AND the
- *            two rows standing on OPPOSITE identity sides (exactly one of them
- *            carries a Google place_id). That is the actual evidence for
- *            "Рептил" ≡ "Reptil Market br.3 Kisela Voda": Google identified the
- *            site and the OSM row is its local-script name. It is exactly what
- *            is MISSING for two un-identified rows that merely share a brand
- *            ("Kipper" vs "Kipper Market - Butel" = different branches), so
- *            those stay separate — the branch protection is unchanged.
+ *            the smaller side carrying ≥1 distinctive (≥4-char) token AND AT
+ *            LEAST ONE of the two rows carrying a Google place_id. That is the
+ *            evidence for "Рептил" ≡ "Reptil Market br.3 Kisela Voda": Google
+ *            identified the site and the OSM row is its local-script name — and
+ *            it also covers Google's own duplicate card for one building
+ *            ("Ramstore - City Mall" ≡ "Тц Сити Мол"). Two UN-identified rows
+ *            that merely share a brand ("Kipper" vs "Kipper Market - Butel" =
+ *            different branches) still stay separate.
  *   embassy— both embassies, same country, same qualifier state, no country
  *            contradiction, within IDENTITY_EMBASSY_RADIUS. A country has at
  *            most one main embassy per city; the residence/consular-section
@@ -1655,7 +1808,30 @@ export function samePlaceName(
   const sameSet = ta.size === tb.size && [...ta].every(t => tb.has(t));
   if (sameSet && distanceM <= IDENTITY_TOKEN_RADIUS) return { same: true, tier: 'token' };
 
-  const subset = [...ta].every(t => tb.has(t)) || [...tb].every(t => ta.has(t));
+  // A QUALIFIER IS A DIFFERENT PLACE (an embassy vs its consular section), and
+  // it gates every tier below — computed once, so a tier can never be added
+  // without it by accident.
+  const qualifierAgrees = hasIdentityQualifier(nameA) === hasIdentityQualifier(nameB);
+
+  // TWO GOOGLE CARDS FOR ONE BUILDING ARE STILL ONE BUILDING. An IDENTICAL
+  // name (a byte-for-byte bijection of the sound keys) inside 45 m is one
+  // place, and Google routinely keeps a duplicate card for it: «Сити Мол» and
+  // «Skopje City Mall» both carry a place_id, 44 m apart, and the EB 48 roster
+  // listed the same mall twice. A REAL second branch always carries the token
+  // that tells it apart (a number — «Веро 9»/«Веро 7» — or a quarter —
+  // «Kipper Market - Butel»), which makes the sets unequal here; the
+  // CONTAINMENT tier still requires exactly one identified side, because there
+  // the missing words are unproven.
+  const soundSame = qualifierAgrees
+    && distanceM <= IDENTITY_SOUND_RADIUS
+    && [...ta, ...tb].some(t => t.length >= 4)
+    && soundBijection(ta, tb);
+  if (soundSame) return { same: true, tier: 'sound' };
+
+  const subset = [...ta].every(t => tb.has(t)) || [...tb].every(t => ta.has(t))
+    // …or the smaller name is CONTAINED in the larger up to spelling/script:
+    // «Реrтил» ⊂ «Reptil Market br.3 Kisela Voda» holds by sound too.
+    || soundContained(ta, tb) || soundContained(tb, ta);
   const smaller = ta.size <= tb.size ? ta : tb;
   const larger = ta.size <= tb.size ? tb : ta;
   const distinctive = [...smaller].some(t => t.length >= 4);
@@ -1667,13 +1843,20 @@ export function samePlaceName(
   // it are two businesses in one building, like the bank-in-mall case).
   const onlyDigitsAdded = [...larger].every(t => smaller.has(t) || /^\d+$/.test(t))
     && [...larger].some(t => !smaller.has(t));
-  const exclusiveIdentity = hasIdentityA !== hasIdentityB;
+  // AT LEAST ONE SIDE MUST BE IDENTIFIED. That is the evidence that the
+  // longer name describes the SAME site rather than another branch of it. It
+  // used to demand EXACTLY one, which is why the EB 48 mall stayed twice in the
+  // roster: Google keeps two cards for the mall («Ramstore - City Mall» and
+  // «Тц Сити Мол»), both identified, and the containment tier refused the pair
+  // it was built for. Two UNIDENTIFIED rows still never match by containment —
+  // «Kipper» vs «Kipper Market - Butel» are different branches, and nothing in
+  // the names says which one a Google card would belong to.
+  const identityEvidence = hasIdentityA || hasIdentityB;
   // The qualifier guard applies here too: "Embassy of Republic of Turkey"
   // contains "Turkish Embassy (Residence)", but the residence is a DIFFERENT
   // building — containment must never fuse an institution with its
   // consular section / residence.
-  const qualifierAgrees = hasIdentityQualifier(nameA) === hasIdentityQualifier(nameB);
-  if (subset && distinctive && exclusiveIdentity && qualifierAgrees && !onlyDigitsAdded
+  if (subset && distinctive && identityEvidence && qualifierAgrees && !onlyDigitsAdded
       && distanceM <= IDENTITY_SUBSET_RADIUS) {
     return { same: true, tier: 'subset' };
   }
@@ -1914,11 +2097,37 @@ export function mergeSamePlace(keep: MergedPoi, other: MergedPoi, centerLat: num
   };
 }
 
+/** TYPES THAT OCCUPY GROUND, NOT A DOORSTEP. The identity radii encode "one
+ *  building"; a mall, a campus or a stadium IS the ground between its own two
+ *  rows. The EB 48 mall («Ramstore - City Mall» / «Тц Сити Мол» / «Сити Мол»)
+ *  stands on three nodes 36–50 m apart, so every fixed radius under 50 m left the
+ *  same mall in the roster twice. Scaling the radius for a pair where BOTH
+ *  sides are such a type is not a looser rule: it is the same rule measured
+ *  against the footprint the type actually has. A pharmacy inside the
+ *  supermarket, or a shop inside the mall, is NOT scaled — one side is not a
+ *  large-footprint type — so containment can still never fuse a tenant. */
+const LARGE_FOOTPRINT_TYPES = new Set([
+  'mall', 'shopping_mall', 'department_store',
+  'university', 'college', 'campus',
+  'stadium', 'sports_centre', 'airport', 'hospital',
+]);
+export const LARGE_FOOTPRINT_SCALE = 2.5;
+
 /** Same-place test for two POI rows: Google's identity when both carry one,
- *  otherwise the shared bilingual name rule at the real row-to-row distance. */
+ *  otherwise the shared bilingual name rule at the real row-to-row distance
+ *  (scaled for a pair of large-footprint types — see above). */
 export function samePlacePoi(a: MergedPoi, b: MergedPoi): PlaceAgreement {
   if (a.place_id && b.place_id && a.place_id === b.place_id) return { same: true, tier: 'token' };
-  return samePlaceName(a.name, b.name, distM(a.lat, a.lon, b.lat, b.lon), !!a.place_id, !!b.place_id);
+  // Google's rows carry DISPLAY types («Shopping mall», «Department store») while
+  // OSM's carry the tag («shopping_mall»), so the class is normalised before the
+  // lookup — otherwise the mall pair was never recognised as large-footprint.
+  const typeClass = (t: unknown): string => String(t ?? '').toLowerCase().trim().replace(/[\s-]+/g, '_');
+  const largeA = LARGE_FOOTPRINT_TYPES.has(typeClass(a.type));
+  const largeB = LARGE_FOOTPRINT_TYPES.has(typeClass(b.type));
+  const d = distM(a.lat, a.lon, b.lat, b.lon);
+  const scaled = largeA && largeB ? d / LARGE_FOOTPRINT_SCALE : d;
+  const verdict = samePlaceName(a.name, b.name, scaled, !!a.place_id, !!b.place_id);
+  return verdict;
 }
 
 /** ONE map row with the per-row derivations the name passes need.
@@ -2225,13 +2434,53 @@ export class OfflineMapStore {
     const merged: MergedPoi[] = [];
     const byDistance = (a: { dist: number; name: string }, b: { dist: number; name: string }): number =>
       a.dist - b.dist || a.name.localeCompare(b.name);
+    // NO TWO IDENTITY TESTS BEYOND THE WIDEST RADIUS. `samePlacePoi` rebuilds
+    // both names' token sets, so comparing every row in a 500 m window against
+    // every survivor cost 8.8 s in the city centre (a 2 000-row window squared,
+    // measured 2026-11-23) — a turn cannot pay that. The widest tier is the
+    // embassy one (200 m), so a pair further apart cannot be one place and the
+    // distance is a free, exact prefilter.
+    const near = (a: { lat: number; lon: number }, b: { lat: number; lon: number }): boolean =>
+      distM(a.lat, a.lon, b.lat, b.lon) <= IDENTITY_EMBASSY_RADIUS;
+    const touched = new Set<MergedPoi>();
     for (const poi of clean.sort(byDistance)) {
-      const dupIdx = merged.findIndex(g => samePlacePoi(g, poi).same);
+      const dupIdx = merged.findIndex(g => near(g, poi) && samePlacePoi(g, poi).same);
       if (dupIdx >= 0) {
         merged[dupIdx] = mergeSamePlace(merged[dupIdx], poi, lat, lon);
+        touched.add(merged[dupIdx]!);
         continue;
       }
       merged.push(poi);
+    }
+    // …AND THE MERGE MUST REACH ITS OWN FIXED POINT. `mergeSamePlace` takes
+    // Google's coordinates and the local-script name, so joining two rows can
+    // make the result the same place as a THIRD row it did not resemble before
+    // — and the one-pass loop had already walked past it. The live audit caught
+    // exactly that («Томи» took a slot beside «Тобако Томи»): a rotation may
+    // never hold two entries that its own identity rule calls one place.
+    //
+    // ONLY THE TOUCHED ROWS ARE RE-EXAMINED. A merged entry is the only thing
+    // whose name/coordinates changed, so it is the only thing that can have
+    // gained a new twin; re-testing every pair in a dense centre cost 9.5 s (a
+    // 2 000-row window squared), which no turn can pay.
+    const queue = [...touched];
+    while (queue.length) {
+      const cur = queue.pop()!;
+      const idx = merged.indexOf(cur);
+      if (idx < 0) continue;
+      for (let j = 0; j < merged.length; j++) {
+        if (j === idx) continue;
+        const other = merged[j]!;
+        if (!near(cur, other)) continue;
+        if (!samePlacePoi(cur, other).same) continue;
+        // The NEARER row keeps the slot (the list is distance-ordered) and
+        // absorbs the other — the same choice the first pass makes.
+        const keep = Math.min(idx, j), drop = Math.max(idx, j);
+        merged[keep] = mergeSamePlace(merged[keep]!, merged[drop]!, lat, lon);
+        merged.splice(drop, 1);
+        queue.push(merged[keep]!);
+        break;
+      }
     }
     // STEP 5 — the significance-ordered pool. Ordinary places fill the cap
     // first; transit stops fill unused slots only as fallbacks, so a dense
@@ -2600,6 +2849,9 @@ export class OfflineMapStore {
     // (normalizeStreet lowercases — fine for keys, ugly for display).
     const street = src.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
     if (!key || key.length < 3 || !houseNum || !street) return false;
+    // THE WRITE GUARD (see assessStreetKey): a landmark/business phrase must
+    // never become an address row the resolver trusts.
+    if (!assessStreetKey(street).streetLike) return false;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
     // Writes need a READ-WRITE connection — open it lazily and keep it (a
     // cron drain teaches many streets in one run). On failure (read-only FS,
@@ -2647,6 +2899,8 @@ export class OfflineMapStore {
     // display and for later per-number learning on the same street).
     const name = src.replace(/\s+\d+(?:[\s.\-/]*(?:\d+|[а-яa-z]+))*\s*$/i, '').trim();
     if (!key || key.length < 3 || !name) return false;
+    // THE WRITE GUARD (see assessStreetKey) — the same predicate the prune uses.
+    if (!assessStreetKey(name).streetLike) return false;
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
     if (!this.rwDb) {
       try { this.rwDb = new Database(this.dbPath ?? '', { timeout: 5000 }); } catch { return false; }

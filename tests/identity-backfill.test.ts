@@ -174,11 +174,19 @@ test('hasIdentifiedTwin: a neighbouring row with the same place needs no second 
   const target: IdentityTarget = {
     rowid: osm, name: 'Сити Мол', type: 'mall', lat: 42.0, lon: 21.43, group: 'pool', nearestPropertyM: 10,
   };
-  // "Сити Мол" and "City Mall" share no token — the identity rule does NOT
-  // claim they are one place, so this row still needs its own search.
-  assert.equal(hasIdentifiedTwin(db, target), false);
-  const twinTarget: IdentityTarget = { ...target, name: 'City Mall' };
-  assert.equal(hasIdentifiedTwin(db, twinTarget), true);
+  // RE-PINNED 2026-11-23 (the sound tier): «Сити» and «City» are ONE word in
+  // the map's own sound fold (city → st, siti → st), so the identity rule now
+  // claims these rows are one place — the twin already holds Google's identity,
+  // and a second search would spend quota to learn what the map already knows.
+  // Before this the tier only compared characters, so this pair (the EB 48
+  // roster defect) cost a search and still came back unidentified.
+  assert.equal(hasIdentifiedTwin(db, target), true);
+  // THE TIER BRIDGES A SPELLING, NEVER A DISTANCE: a differently-named place
+  // standing 16 m away is still its own search — the branch beside a mall is
+  // not the mall.
+  addPo(db, { name: 'Ramstore', type: 'mall', lat: 42.0002, lon: 21.4302 });
+  const besideMall = addPo(db, { name: 'Веро Маркет', type: 'supermarket', lat: 42.0004, lon: 21.43 });
+  assert.equal(hasIdentifiedTwin(db, { ...target, rowid: besideMall, name: 'Веро Маркет', type: 'supermarket', lat: 42.0004, lon: 21.43 }), false);
 });
 
 test('isLandmarkName: placeholders are not worth a search', () => {
