@@ -23,6 +23,8 @@
  *   npx tsx scripts/identity-review.ts --write     # + data/identity-class-review.md
  *   npx tsx scripts/identity-review.ts --verify    # one paid search per unanchored row
  *   npx tsx scripts/identity-review.ts --verify --cap=10 --name=Магли
+ *   npx tsx scripts/identity-review.ts --names     # the OTHER refusal class (names differ)
+ *   npx tsx scripts/identity-review.ts --sweep     # every row, not just the refused ones
  *
  * `--verify` re-searches ONLY the unanchored rows, records the candidate's
  * type/position/address back into the refusal ledger (so no second run has to
@@ -41,7 +43,10 @@ import { REPO_ROOT, resolveMapDb } from '../src/geo/runtimeDb';
 import { capturePoi } from '../src/geo/serpCapture';
 import { createSerpClient, loadSerpApiKeys, remainingLeft } from '../src/geo/serpApi';
 import { distM } from '../src/geo/precision';
-import { identityKey, samePlaceName, samePlacePoi, streetKey, type MergedPoi } from '../src/geo/offlineMap';
+import {
+  GENERIC_VENUE_TOKENS, identityKey, identityTokens, samePlaceName, samePlacePoi, streetKey,
+  type MergedPoi,
+} from '../src/geo/offlineMap';
 import {
   decideFree, decideVerified, parseGoogleAddress,
   type AddressPoint, type DriftCandidate, type DriftDecision, type DriftRow, type FreeWitness,
@@ -57,6 +62,8 @@ const val = (flag: string): string | undefined => {
 };
 const WRITE = has('--write');
 const VERIFY = has('--verify');
+const NAMES = has('--names');
+const SWEEP = has('--sweep');
 const CAP = val('--cap') ? parseInt(val('--cap')!, 10) : Infinity;
 const NAME = val('--name');
 
@@ -129,6 +136,125 @@ function resolveAddressPoint(addresses: Addr[], candidate: DriftCandidate, row: 
   };
 }
 
+/**
+ * THE OTHER REFUSAL CLASS: `not-same-place` (230 of 399). The names did not
+ * bind, so the identity was never written — right when the search found a
+ * different branch or a translated name, wasted when the map ALREADY knows that
+ * place under the candidate's name. This pass answers only that: is the refused
+ * identity already in the map, and if not, is there a name rule that should
+ * have seen it? It never accepts anything; it lists the residue for a human.
+ */
+function nameAudit(
+  ledger: Map<number, { miss: Miss; file: string }>,
+  byId: Map<number, Row>,
+  all: Row[],
+  identified: Row[],
+): void {
+  const refused = [...ledger].flatMap(([rowid, { miss }]) => {
+    const row = byId.get(rowid);
+    return row && miss.why === 'not-same-place' ? [{ row, miss }] : [];
+  });
+  const covered: typeof refused = [];
+  const candidateKnown: typeof refused = [];
+  const residue: typeof refused = [];
+  for (const d of refused) {
+    const here: MergedPoi = { name: d.row.name, type: d.row.type, lat: d.row.lat, lon: d.row.lon, dist: 0 };
+    const twin = identified.some(r => r.rowid !== d.row.rowid
+      && Math.abs(r.lat - here.lat) <= 0.004 && Math.abs(r.lon - here.lon) <= 0.006
+      && samePlacePoi(here, { name: r.name, type: r.type, lat: r.lat, lon: r.lon, dist: distM(here.lat, here.lon, r.lat, r.lon) }).same);
+    if (twin) { covered.push(d); continue; }
+    // Does the map already hold the CANDIDATE's place? Then the refused identity
+    // was never needed: the reader already answers with a known row.
+    const known = identified.some(r => r.rowid !== d.row.rowid
+      && samePlaceName(d.miss.candidate, r.name, 0, false, true).same);
+    if (known) candidateKnown.push(d); else residue.push(d);
+  }
+  console.log('=== not-same-place refusals — is the place already in the map? ===');
+  console.log(`refusals: ${refused.length}`);
+  console.log(`  the row already has an identified twin nearby: ${covered.length}`);
+  console.log(`  the map already knows the candidate's name: ${candidateKnown.length}`);
+  console.log(`  residue — no closure, a name rule may be missing: ${residue.length}`);
+  // WHY the residue did not bind: nothing in common at all (a translation) or a
+  // shared NAME word with a translated CATEGORY (џамија ⇄ mosque). The second
+  // class is what a bilingual kind lexicon would close; the first needs a
+  // dictionary, not a rule.
+  const share = (d: { row: Row; miss: Miss }) => {
+    const a = identityTokens(d.row.name);
+    const b = identityTokens(d.miss.candidate);
+    return a.filter(t => b.includes(t));
+  };
+  const kindOnly = residue.filter(d => {
+    const s = share(d).filter(t => t.length >= 4 && !GENERIC_VENUE_TOKENS.has(t));
+    return s.length === 0 && share(d).length > 0;
+  });
+  const sharedName = residue.filter(d => share(d).some(t => t.length >= 4 && !GENERIC_VENUE_TOKENS.has(t)));
+  const nothing = residue.filter(d => share(d).length === 0);
+  console.log('');
+  console.log(`  of which: share only a category word ${kindOnly.length}, share a name word ${sharedName.length}, share nothing at all ${nothing.length}`);
+  console.log('');
+  for (const d of residue.sort((a, b) => a.row.type.localeCompare(b.row.type))) {
+    console.log(`  · [${d.row.type}] ${d.row.name}  ⇄  «${d.miss.candidate}»  {${share(d).join(',')}}`);
+  }
+  console.log('');
+  console.log('candidate-known sample (nothing to fix, listed to prove the bucket):');
+  for (const d of candidateKnown.slice(0, 10)) console.log(`  · ${d.row.name}  ⇄  «${d.miss.candidate}»`);
+  void all;
+}
+
+/**
+ * EVERY ROW, NOT JUST THE REFUSED ONES: which pins does the address fabric not
+ * support at all? A shop, café, bank or office stands on a building, so its pin
+ * should have a house number close by; a park, bus stop, artwork or church may
+ * legitimately have none, and those classes are not evidence of a bad pin.
+ */
+function sweep(all: Row[], addresses: Addr[]): void {
+  // A KIND THAT IS NOT A BUILDING has no house number to stand on: a village,
+  // a bus stop, a park, an artwork, a church in a yard. They are excluded so
+  // the sweep measures pins, not the address fabric's coverage of the hillside.
+  const ADDRESSLESS = /bus|taxi|park|village|hamlet|town|suburb|quarter|neighbourhood|locality|place$|residential|yes$|artwork|memorial|monument|viewpoint|peak|natural|pitch|stadium|cemetery|grave|ruins|fuel|parking|atm$|worship|church|mosque|monastery|fountain|playground|alpine|ticket|biergarten|attraction|tourist|industrial$/i;
+  const rows = all.filter(r => !ADDRESSLESS.test(r.type));
+  const buckets = [0, 40, 100, 200, 300, 500, Infinity];
+  const counts = new Array(buckets.length - 1).fill(0) as number[];
+  /** Fabric exists around the row, but the pin itself is off it. */
+  const suspects: Array<{ row: Row; d: number; near: number; at: string }> = [];
+  for (const r of rows) {
+    const near = nearestAddress(addresses, r.lat, r.lon);
+    const d = near ? near.d : Infinity;
+    let i = 0;
+    while (i < buckets.length - 2 && d > buckets[i + 1]) i++;
+    counts[i]++;
+    // A 100 m gap inside a SAMPLED fabric (7 690 house numbers over 5 965 POIs)
+    // is normal — most buildings have only their main entrance mapped, and a
+    // shop in a block interior sits far from it. The only defensible case is a
+    // pin that is far from EVERY number in a DENSE block (≥ 20 within 300 m),
+    // where 150 m of gap cannot be explained by the sample.
+    if (d <= 150) continue;
+    // HOW MANY house numbers are near enough to say the fabric REACHES this
+    // block: with no neighbours it is the hillside's coverage, not a bad pin.
+    let around = 0;
+    for (const a of addresses) {
+      if (!String(a.housenumber ?? '').trim()) continue;
+      if (Math.abs(a.lat - r.lat) > 0.0035 || Math.abs(a.lon - r.lon) > 0.0045) continue;
+      if (distM(r.lat, r.lon, a.lat, a.lon) <= 300) around++;
+    }
+    if (around >= 20) suspects.push({ row: r, d, near: around, at: near ? `${near.at.street} ${near.at.housenumber}` : '(none)' });
+  }
+  console.log('=== every street-addressed row — is its pin on a building? ===');
+  console.log(`rows swept: ${rows.length} of ${all.length} (villages, stops, parks, artworks, churches … excluded)`);
+  for (let i = 0; i < counts.length; i++) {
+    const lo = buckets[i] === 0 ? '0' : String(buckets[i]);
+    const hi = Number.isFinite(buckets[i + 1]) ? `≤${buckets[i + 1]}` : '+';
+    console.log(`  ${`${lo}–${hi}m`.padStart(10)}: ${counts[i]}`);
+  }
+  console.log('');
+  console.log('CANDIDATES — dense fabric (≥20 house numbers within 300 m) but the pin is');
+  console.log(`more than 150 m from every one of them. NOT a verdict: the fabric is a`);
+  console.log(`sample, so each row needs its own confirmation: ${suspects.length}`);
+  for (const w of suspects.sort((a, b) => a.row.name.localeCompare(b.row.name))) {
+    console.log(`  ${(Number.isFinite(w.d) ? Math.round(w.d) : '∞').toString().padStart(5)}m [${w.row.type}] ${w.row.name} (${w.row.lat.toFixed(4)}/${w.row.lon.toFixed(4)}) · ${w.near} numbers within 300 m · nearest ${w.at}`);
+  }
+}
+
 async function main(): Promise<void> {
   const resolved = resolveMapDb();
   const dbFile = resolved?.file ?? path.join(DATA, 'skopje-pois.db');
@@ -153,6 +279,8 @@ async function main(): Promise<void> {
   }
 
   const identified = all.filter(r => r.place_id);
+  if (NAMES) { nameAudit(ledger, byId, all, identified); return; }
+  if (SWEEP) { sweep(all, addresses); return; }
   const decisions = drift.map(d => {
     // A twin is a row the identity rule says is THE SAME PLACE — distance alone
     // proved nothing: «Betty» was "covered" by the pharmacy next door at 4 m,
