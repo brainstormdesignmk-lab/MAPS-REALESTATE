@@ -86,6 +86,13 @@ export interface CapturedPoi {
   lat: number;
   lon: number;
   place_id: string | null;   // hex pair "0x…:0x…" — Google identity
+  /** Google's own address line («Orce Nikolov 137, Skopje 1000»). Never
+   *  written to the map (a POI row has no address column) — it is the WITNESS
+   *  a refused candidate needs: when the map's pin and Google's disagree, the
+   *  address says which building the record is about, and our own address
+   *  table turns it into a coordinate. Without it, every refusal had to be
+   *  re-searched by hand before anyone could tell a drifted pin from a branch. */
+  address: string | null;
   review_count: number | null;
   rating: number | null;
   plus_code: string | null;
@@ -138,6 +145,7 @@ export function capturePoi(r: any, fallbackType: string): CapturedPoi | null {
     type: typeof r.type === 'string' && r.type ? r.type : fallbackType,
     lat, lon,
     place_id: placeId,
+    address: typeof r.address === 'string' && r.address ? r.address : null,
     // FIELD-NAME LESSON (same class as data_id): SerpApi's local_results
     // item carries `reviews` (number) and `price` (string, "$"/"$$"/…),
     // NOT `review_count`/`price_level`. Reading the wrong key silently

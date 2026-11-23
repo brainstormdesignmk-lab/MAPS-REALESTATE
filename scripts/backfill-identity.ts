@@ -55,6 +55,7 @@ import * as fs from 'fs';
 import Database from 'better-sqlite3';
 import { resolveMapDb, REPO_ROOT } from '../src/geo/runtimeDb';
 import { capturePoi, type CapturedPoi } from '../src/geo/serpCapture';
+import { createSerpClient, loadSerpApiKeys, remainingLeft } from '../src/geo/serpApi';
 import {
   selectIdentityTargets, acceptIdentity, writeIdentity, identityCoverage, hasIdentifiedTwin,
   ANCHOR_CLASSES, POOL_RADIUS_M, type IdentityOrigin, type IdentityTarget,
@@ -103,81 +104,13 @@ function log(msg: string): void {
 }
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-// ── SerpApi keys (the same two sources every paid script reads) ──────────────
-function loadSerpApiKeys(): string[] {
-  const keys: string[] = [];
-  if (process.env.SERPAPI_KEY) keys.push(process.env.SERPAPI_KEY);
-  const gmapsFile = path.join(REPO_ROOT, 'GOOGLEMAPS_API_KEY.txt');
-  const serpFile = path.join(REPO_ROOT, 'data', 'serpapi-key.txt');
-  for (const file of [serpFile, gmapsFile]) {
-    if (!fs.existsSync(file)) continue;
-    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
-      const t = line.trim();
-      if (!t || /^[A-Z]/.test(t)) continue;
-      if (/^[0-9a-f]{40,}$/i.test(t) && !keys.includes(t)) keys.push(t);
-    }
-  }
-  return keys;
-}
-
-const KEYS = loadSerpApiKeys();
-const keyLeft: number[] = KEYS.map(() => -1);
-let keyIdx = 0;
-let totalLeft = 0;
-
-async function probeKeys(): Promise<void> {
-  totalLeft = 0;
-  for (let i = 0; i < KEYS.length; i++) {
-    try {
-      const res = await fetch(`https://serpapi.com/account?api_key=${KEYS[i]}`);
-      const data = await res.json() as { plan_searches_left?: number; error?: string };
-      keyLeft[i] = typeof data.plan_searches_left === 'number' ? data.plan_searches_left : 0;
-    } catch {
-      keyLeft[i] = 0;
-    }
-    if (keyLeft[i] > 0) totalLeft += keyLeft[i];
-  }
-}
-
-/** One paced Google Maps search. Returns the raw payload or null (no key or
- *  the request failed — nothing billed, nothing written). */
-async function search(query: string, ll: string): Promise<any | null> {
-  for (let attempt = 0; attempt < KEYS.length; attempt++) {
-    if (KEY_ONLY !== null) {
-      // A pinned worker never touches another key (unless its own has run out,
-      // in which case it stops instead of stealing a sibling's quota).
-      if (keyLeft[KEY_ONLY] === 0) return null;
-      keyIdx = KEY_ONLY;
-    }
-    const i = keyIdx % Math.max(1, KEYS.length);
-    if (keyLeft[i] === 0) { keyIdx++; continue; }
-    const url = `https://serpapi.com/search?engine=google_maps&type=search&q=${encodeURIComponent(query)}&hl=en&ll=${encodeURIComponent(ll)}&api_key=${KEYS[i]}`;
-    let data: any = null;
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 30_000);
-      const res = await fetch(url, { signal: ctrl.signal });
-      clearTimeout(timer);
-      if (res.status === 429) { keyLeft[i] = 0; keyIdx++; continue; }
-      data = await res.json();
-    } catch (e) {
-      log(`  ⚠ request failed: ${(e as Error).message}`);
-      return null;
-    }
-    const err = String(data?.error ?? '');
-    if (/run out|invalid api key|expired/i.test(err)) {
-      keyLeft[i] = 0;
-      keyIdx++;
-      continue;
-    }
-    if (err) { log(`  ⚠ SerpApi: ${err}`); return null; }
-    if (keyLeft[i] > 0) keyLeft[i]--;
-    totalLeft = Math.max(0, totalLeft - 1);
-    keyIdx++;
-    return data;
-  }
-  return null;
-}
+// ── SerpApi (the shared paid client — `src/geo/serpApi.ts`) ───────────────────
+const KEYS = loadSerpApiKeys(REPO_ROOT);
+const client = createSerpClient(KEYS, { keyOnly: KEY_ONLY, log });
+const keyLeft = client.left;
+const totalLeft = (): number => remainingLeft(client);
+const probeKeys = () => client.probe();
+const search = (query: string, ll: string) => client.search(query, ll);
 
 // ── Feed origins ─────────────────────────────────────────────────────────────
 const SUPABASE_URL = process.env.SUPABASE_URL ?? 'https://qkgioqotxjxffiaufgwd.supabase.co';
@@ -197,7 +130,24 @@ async function fetchOriginProperties(): Promise<Array<IdentityOrigin & { eb: str
 }
 
 // ── Miss ledger ──────────────────────────────────────────────────────────────
-interface MissEntry { attempts: number; why: string; candidate?: string; last: string }
+// A REFUSAL IS EVIDENCE, NOT A NAME. The ledger used to keep only the refused
+// candidate's name, so answering "is the map pin wrong or is this another
+// branch?" cost one paid search per row — the operator's 64-row review had to
+// re-buy evidence the run already had in hand. Keep the witness: the candidate's
+// type, coordinates, address and distance are what decide the question, and the
+// address is why `serpCapture` now carries `address` at all.
+interface MissEntry {
+  attempts: number;
+  why: string;
+  candidate?: string;
+  last: string;
+  candidateType?: string | null;
+  candidateAddress?: string | null;
+  candidateLat?: number | null;
+  candidateLon?: number | null;
+  movedM?: number;
+  placeId?: string | null;
+}
 function loadMisses(): Record<string, MissEntry> {
   try {
     return JSON.parse(fs.readFileSync(MISS_FILE, 'utf8')) as Record<string, MissEntry>;
@@ -270,7 +220,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
   }
 
   await probeKeys();
-  log(`keys: ${KEYS.filter((_, i) => keyLeft[i] > 0).length}/${KEYS.length} usable, ${totalLeft} search(es) left`);
+  log(`keys: ${KEYS.filter((_, i) => keyLeft[i] > 0).length}/${KEYS.length} usable, ${totalLeft()} search(es) left`);
   if (has('--keys')) {
     // Index + remaining only — never the key itself. This is how a sharded run
     // picks `--key=<i>` for its workers.
@@ -278,12 +228,12 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
     db.close();
     process.exit(0);
   }
-  if (totalLeft < BUDGET_FLOOR) {
-    console.error(`✗ budget too low (${totalLeft}) — nothing attempted`);
+  if (totalLeft() < BUDGET_FLOOR) {
+    console.error(`✗ budget too low (${totalLeft()}) — nothing attempted`);
     process.exit(1);
   }
 
-  const runCap = Math.min(CAP, totalLeft - BUDGET_FLOOR);
+  const runCap = Math.min(CAP, totalLeft() - BUDGET_FLOOR);
   let spent = 0;
   let written = 0;
   let already = 0;
@@ -295,7 +245,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
 
   for (const t of targets) {
     if (spent >= runCap) { log(`  ⚠ cap (${runCap}) reached — stopping`); break; }
-    if (totalLeft <= BUDGET_FLOOR) { log(`  ⚠ budget floor reached — stopping`); break; }
+    if (totalLeft() <= BUDGET_FLOOR) { log(`  ⚠ budget floor reached — stopping`); break; }
 
     // The neighbouring row already knows this place — no search needed.
     if (hasIdentifiedTwin(db, t)) { twins++; continue; }
@@ -345,10 +295,18 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
       refused++;
       const why = best && !best.verdict.ok ? best.verdict.why : 'no-results';
       whyCount[why] = (whyCount[why] ?? 0) + 1;
-      refusals.push({ name: t.name, why, candidate: best?.cap.name, movedM: best && !best.verdict.ok ? best.verdict.movedM : undefined });
+      const movedM = best && !best.verdict.ok ? best.verdict.movedM : undefined;
+      refusals.push({ name: t.name, why, candidate: best?.cap.name, movedM });
       misses[String(t.rowid)] = {
         attempts: (misses[String(t.rowid)]?.attempts ?? 0) + 1,
         why, candidate: best?.cap.name, last: new Date().toISOString(),
+        // the witness, so the review never has to buy it twice
+        candidateType: best?.cap.type ?? null,
+        candidateAddress: best?.cap.address ?? null,
+        candidateLat: best?.cap.lat ?? null,
+        candidateLon: best?.cap.lon ?? null,
+        movedM,
+        placeId: best?.cap.place_id ?? null,
       };
     }
     saveMisses(misses);
