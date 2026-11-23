@@ -41,8 +41,14 @@ export const SKOPJE_BBOX: [number, number, number, number] = [41.95, 21.25, 42.1
  *  (rank 0, i.e. below a bank), and "cooking school" is classified as the paid
  *  skills class it is. The PUBLIC-PLACE AUDIT (npm run audit:public) went from
  *  FAIL to PASS on this map. Every stored roster predates it, so bump: the next
- *  `hermes:landmarks:feed` re-ranks instead of serving the old order. */
-export const LANDMARK_RANKING_POLICY_VERSION = 5;
+ *  `hermes:landmarks:feed` re-ranks instead of serving the old order.
+ *
+ *  v6 — the RATING LAYER is live: the pool is capped by distance, then each
+ *  rank block is split into 50 m cohorts and ordered by prominence (reviews,
+ *  then rating, then closed), and the feed writer excludes tenant rows the
+ *  handler already excluded (a boutique inside a mall had taken the first
+ *  slot twice). Every stored roster predates the new order, so bump. */
+export const LANDMARK_RANKING_POLICY_VERSION = 6;
 
 /** Public Overpass mirrors — the build tries them in order (they are flaky —
  *  that is exactly why we go offline). */
@@ -2138,20 +2144,72 @@ export class OfflineMapStore {
     // the pharmacy that merely happens to be 20 m closer: typeRank decides,
     // and only equal-significance places are ordered by distance. The caller's
     // radius is the honesty cap (200 m for "во близина" claims) — significance
-    // never reaches outside it. Google prominence still breaks distance ties
-    // inside a class (a busy branch is the one people mean), and transit stops
-    // stay a fallback pool, never crowding out a real place.
-    const prominence = (r: { review_count?: number | null; closed?: number | null; source?: string }): number => {
+    // never reaches outside it. Inside a class, the nearer place wins beyond the
+    // cohort band and the busier/better-rated one wins within it (see the band
+    // rule below); transit stops stay a fallback pool, never crowding out a
+    // real place.
+    // PROMINENCE = how many people know the place, and how good it is.
+    //   • reviews — log scale, so 300 vs 30 is one step, not a landslide;
+    //   • rating — half a star is worth ~1.8× the reviews (weight 0.25 over a
+    //     −3…+5 star scale), because a 4.9★ place with 80 reviews is the one a
+    //     client actually names while a 3.1★ place with 300 is a landmark of
+    //     last resort (a station buffet). Captured since the capture contract
+    //     existed (`rating`), previously never read — the field was dead;
+    //   • closed — a permanently closed place is never an anchor (−1);
+    //   • Google rows keep a hair's lead, so a verified place wins an exact tie
+    //     against a bare OSM row of the same name.
+    const prominence = (r: { review_count?: number | null; rating?: number | null; closed?: number | null; source?: string }): number => {
       if (r.closed === 1) return -1;
       const base = Math.log10((r.review_count ?? 0) + 1);
-      return r.source === 'google' ? base + 0.01 : base;
+      const stars = typeof r.rating === 'number' && Number.isFinite(r.rating)
+        ? 0.25 * Math.max(-2, Math.min(5, r.rating) - 3) / 2
+        : 0;
+      return base + stars + (r.source === 'google' ? 0.01 : 0);
     };
-    const bySignificance = (a: { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string },
-                            b: { dist: number; type: string; name: string; review_count?: number | null; closed?: number | null; source?: string }): number =>
-      typeRank(b.type) - typeRank(a.type)
-      || a.dist - b.dist
-      || prominence(b) - prominence(a)
-      || a.name.localeCompare(b.name);
+    // THE COHORT BAND. Walking distance matters to a client only when the two
+    // choices are genuinely apart; inside 30 m they are "the same corner", and
+    // the busy, well-rated one is the place people mean (two pharmacies on one
+    // street: the 4.7★ with 400 reviews is the one in every direction). Beyond
+    // the band the nearer place wins outright, so proximity is never traded for
+    // popularity. This is the intent the "prominence only reorders a 50 m
+    // cohort" comment always described; before it, distance was compared
+    // EXACTLY, so prominence could only break an identical-metre tie — never.
+    //
+    // COHORTS ARE BUILT, NOT COMPARED. A pairwise "within 50 m" comparator is
+    // NOT transitive (20 m ≪ 60 m ≪ 110 m: the first beats the second on
+    // distance, the second beats the third on reviews, the third beats the
+    // first) and `Array.sort` with a cyclic comparator emits an arbitrary order.
+    // So: rank blocks first, each block split into cohorts anchored at its
+    // nearest member, and only then ordered by prominence inside a cohort.
+    const PROMINENCE_BAND_M = 30;
+    type Rankable = { dist: number; type: string; name: string; review_count?: number | null; rating?: number | null; closed?: number | null; source?: string };
+    const bySignificance = (list: Rankable[]): Rankable[] => {
+      const byRankThenDistance = [...list].sort((a, b) =>
+        typeRank(b.type) - typeRank(a.type) || a.dist - b.dist || a.name.localeCompare(b.name));
+      const out: Rankable[] = [];
+      let cohort: Rankable[] = [];
+      let anchorDist = 0;
+      const flush = () => {
+        cohort.sort((a, b) => prominence(b) - prominence(a) || a.dist - b.dist || a.name.localeCompare(b.name));
+        out.push(...cohort);
+        cohort = [];
+      };
+      for (const poi of byRankThenDistance) {
+        if (cohort.length === 0) {
+          cohort.push(poi);
+          anchorDist = poi.dist;
+          continue;
+        }
+        const sameBlock = typeRank(poi.type) === typeRank(cohort[0].type);
+        if (!sameBlock || poi.dist - anchorDist > PROMINENCE_BAND_M) {
+          flush();
+          anchorDist = poi.dist;
+        }
+        cohort.push(poi);
+      }
+      flush();
+      return out;
+    };
     // SAME-PLACE COLLAPSE — the ONE bilingual identity rule (samePlacePoi),
     // shared with the map build (scripts/identity-heal.ts), so the request
     // path can never disagree with what the build merged:
@@ -2178,11 +2236,19 @@ export class OfflineMapStore {
     // STEP 5 — the significance-ordered pool. Ordinary places fill the cap
     // first; transit stops fill unused slots only as fallbacks, so a dense
     // stop cluster cannot crowd out a real public place. A verified Google
-    // identity may change merged coordinates, so the order uses the
-    // post-merge distances.
-    const primaryPool = merged.filter(p => secondaryTransit(p.type) === 0).sort(bySignificance).slice(0, limit);
+    // identity may change merged coordinates, so the distance uses the
+    // post-merge values.
+    //
+    // THE CAP IS DISTANCE-FIRST: `limit` decides WHICH places are candidates
+    // (the nearest ones — a 40-review café 600 m away can never displace the
+    // corner pharmacy), and only the surviving cohort is ordered by
+    // significance/prominence. Capping after the significance sort let one
+    // famous place three streets away consume a near slot.
+    const cappedByDistance = (list: MergedPoi[], n: number): MergedPoi[] =>
+      bySignificance([...list].sort(byDistance).slice(0, n)) as MergedPoi[];
+    const primaryPool = cappedByDistance(merged.filter(p => secondaryTransit(p.type) === 0), limit);
     const transitPool = primaryPool.length < limit
-      ? merged.filter(p => secondaryTransit(p.type) === 1).sort(bySignificance).slice(0, limit - primaryPool.length)
+      ? cappedByDistance(merged.filter(p => secondaryTransit(p.type) === 1), limit - primaryPool.length)
       : [];
     const candidates = [...primaryPool, ...transitPool];
     return candidates.map(p => ({

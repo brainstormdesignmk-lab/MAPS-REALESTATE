@@ -299,6 +299,67 @@ test('the NEIGHBOURHOOD of a place is the map\'s nearest OSM quarter', () => {
   store.close();
 });
 
+test('nearestPois: inside the cohort band the busier, better-rated branch wins', () => {
+  const dbPath = tmpDb();
+  // Two pharmacies of the same class, 25 m apart (one building's two entrances):
+  // one 20 m away with no identity, one 45 m away with 400 Google reviews at
+  // 4.7★. A client on that corner says the busy one, and the reply states the
+  // distance either way.
+  writeMap(dbPath, [
+    { name: 'Аптека Блиску', type: 'pharmacy', lat: 42.00018, lon: 21.43 },
+    { name: 'Аптека Позната', type: 'pharmacy', lat: 42.00041, lon: 21.43,
+      source: 'google', place_id: '0x1:0x2', review_count: 400, rating: 4.7 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  const pois = store.nearestPois(42.0, 21.43, 500, 10);
+  assert.deepEqual(pois.map(p => p.name), ['Аптека Позната', 'Аптека Блиску']);
+  // …and the distance it reports is its own, not the nearer one's.
+  assert.ok(pois[0].distance_m > pois[1].distance_m);
+  store.close();
+});
+
+test('nearestPois: beyond the band the nearer place wins outright', () => {
+  const dbPath = tmpDb();
+  // 20 m vs 180 m — different corners of the same street. Prominence may not
+  // trade 160 m of walking for popularity.
+  writeMap(dbPath, [
+    { name: 'Аптека Блиску', type: 'pharmacy', lat: 42.00018, lon: 21.43 },
+    { name: 'Аптека Позната', type: 'pharmacy', lat: 42.00162, lon: 21.43,
+      source: 'google', place_id: '0x1:0x2', review_count: 4000, rating: 5 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  assert.deepEqual(store.nearestPois(42.0, 21.43, 500, 10).map(p => p.name),
+    ['Аптека Блиску', 'Аптека Позната']);
+  store.close();
+});
+
+test('nearestPois: at equal review counts the higher rating decides', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Кафе Слабо', type: 'cafe', lat: 42.00009, lon: 21.43,
+      source: 'google', place_id: '0x1:0x2', review_count: 200, rating: 3.1 },
+    { name: 'Кафе Добро', type: 'cafe', lat: 42.00027, lon: 21.43,
+      source: 'google', place_id: '0x3:0x4', review_count: 200, rating: 4.9 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  assert.equal(store.nearestPois(42.0, 21.43, 500, 10)[0].name, 'Кафе Добро');
+  store.close();
+});
+
+test('nearestPois: a permanently closed place is never an anchor', () => {
+  const dbPath = tmpDb();
+  writeMap(dbPath, [
+    { name: 'Аптека Затворена', type: 'pharmacy', lat: 42.00009, lon: 21.43,
+      source: 'google', place_id: '0x1:0x2', review_count: 900, rating: 4.8, closed: 1 },
+    { name: 'Аптека Работи', type: 'pharmacy', lat: 42.00027, lon: 21.43,
+      source: 'google', place_id: '0x3:0x4', review_count: 5, rating: 3.9 },
+  ], []);
+  const store = new OfflineMapStore(dbPath);
+  assert.deepEqual(store.nearestPois(42.0, 21.43, 500, 10).map(p => p.name),
+    ['Аптека Работи', 'Аптека Затворена']);
+  store.close();
+});
+
 test('no map file → unavailable, everything falls back to live APIs', () => {
   const store = new OfflineMapStore(path.join(os.tmpdir(), 'does-not-exist-surely.db'));
   assert.equal(store.available, false);

@@ -74,13 +74,22 @@ test('nearest POIs are capped at the limit and significance-ranked', () => {
     { name: 'Аптека 24', type: 'pharmacy', lat: 41.9980, lon: 21.4305 },       // ~130m, rank 3
   ], []);
   const store = new OfflineMapStore(dbPath);
-  const pois = store.nearestPois(41.9966, 21.4302, 500, 3);
-  assert.equal(pois.length, 3, 'capped at limit=3');
-  // Significance drives the list (mall → park → pharmacy); the 47m cafe ranks
-  // below all three because a cafe is not a navigation anchor.
-  assert.equal(pois[0].name, 'Рамстор Мол');
-  assert.equal(pois[1].name, 'Парк Градски');
-  assert.equal(pois[2].name, 'Аптека 24');
+  // SIGNIFICANCE ORDERS the list (mall → park → pharmacy); the 50 m cafe ranks
+  // last of the four because a cafe is not a navigation anchor.
+  const all = store.nearestPois(41.9966, 21.4302, 500, 10);
+  assert.deepEqual(all.map(p => p.name), ['Рамстор Мол', 'Парк Градски', 'Аптека 24', 'Кафе Миро']);
+
+  // THE CAP IS DISTANCE-FIRST (see nearestPois: "`limit` decides WHICH places
+  // are candidates"), so limit=3 keeps the three NEAREST and orders them by
+  // significance. The old expectation here was cap-after-significance, which
+  // contradicted the separately pinned rule that a highly reviewed place
+  // outside the nearest N may not displace a nearer candidate (type-normalize
+  // "candidate cap is chosen by distance before popularity ranking"). Both
+  // cannot hold; the distance cap is the documented one.
+  const capped = store.nearestPois(41.9966, 21.4302, 500, 3);
+  assert.equal(capped.length, 3, 'capped at limit=3');
+  assert.deepEqual(capped.map(p => p.name), ['Парк Градски', 'Аптека 24', 'Кафе Миро']);
+  assert.ok(!capped.some(p => p.name === 'Рамстор Мол'), 'the 200 m mall is outside the three nearest');
   store.close();
 });
 test('same place_id merges ACROSS names and distances (embassy alias regression)', () => {

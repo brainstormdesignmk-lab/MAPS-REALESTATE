@@ -208,6 +208,12 @@ async function main(): Promise<void> {
   const capArg = arg('--cap');
   const CAP = capArg ? parseInt(capArg, 10) : undefined;
   const minFeedCount = parseInt(arg('--min-feed-count') ?? '1', 10) || 1;
+  // --skip "A,B,C": addresses the operator knows are NOT streets and must not
+  // be taught (a landmark form like «КАЈ КАТОЛИЧКА», a shop name, the literal
+  // «НЕПОЗНАТА» of a pre-automation row that is being retired). Matched as
+  // case-insensitive substrings against the feed address, BEFORE the census,
+  // so no search is spent on them.
+  const SKIP = (arg('--skip') ?? '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 
   console.log(`=== street-teach (${MODE}${DRY ? ', DRY' : ''}${CAP ? `, cap ${CAP}` : ''}) ===`);
   if (!fs.existsSync(POIS_DB)) { console.error(`Map DB not found: ${POIS_DB}`); process.exit(1); }
@@ -225,8 +231,15 @@ async function main(): Promise<void> {
   censusDb.close();
 
   console.log('Fetching feed addresses...');
-  const feedAddresses = await fetchFeedAddresses();
-  console.log(`feed addresses: ${feedAddresses.length}`);
+  const allFeedAddresses = await fetchFeedAddresses();
+  const skipped = SKIP.length
+    ? allFeedAddresses.filter(a => SKIP.some(s => a.toLowerCase().includes(s)))
+    : [];
+  const feedAddresses = SKIP.length
+    ? allFeedAddresses.filter(a => !SKIP.some(s => a.toLowerCase().includes(s)))
+    : allFeedAddresses;
+  console.log(`feed addresses: ${feedAddresses.length}`
+    + (skipped.length ? ` (${skipped.length} skipped by --skip: ${[...new Set(skipped)].join(' | ')})` : ''));
 
   const candidates = collectCandidates({
     mapStreets, feedAddresses, osmStreets: mapStreets, probes: probe,
