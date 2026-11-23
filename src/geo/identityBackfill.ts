@@ -65,6 +65,62 @@ export const ANCHOR_CLASSES = [
   'police', 'townhall', 'courthouse',
 ] as const;
 
+/** How far a house number may stand from the row's pin and still be the row's
+ *  own building — the drift review's PIN_CORROBORATED_M, used here for the query
+ *  instead of a verdict: it decides which street the search names. */
+export const PIN_WITNESS_M = 40;
+
+/** A house number in the map's own address fabric, as a searching witness. */
+export interface StreetWitness { street: string; housenumber: string; d: number; }
+
+/** The street the map itself records at this pin, or null.
+ *
+ *  WHY THE QUERY NEEDS IT (2026-11-23, the too-far investigation): the pass
+ *  searched «Стопанска Банка, Скопје» city-wide, so Google answered with the
+ *  best-known branch — the head office 1 696 m away — and the identity was
+ *  refused as too far. Searching «Стопанска Банка, Булевар Јане Сандански,
+ *  Скопје» returns the branch at 0 m. The same name search answered a different
+ *  branch for «Рептил» and «Аптека Еурофарм». The street is not a guess: it is
+ *  OUR OWN address fabric, read at the row's own pin. */
+export function pinStreetWitness(
+  db: Database.Database,
+  lat: number,
+  lon: number,
+  maxM: number = PIN_WITNESS_M,
+): StreetWitness | null {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return null;
+  const dLat = maxM / 111_320;
+  const dLon = maxM / (111_320 * Math.max(0.2, Math.cos((lat * Math.PI) / 180)));
+  let rows: Array<{ street: string; housenumber: string; lat: number; lon: number }>;
+  try {
+    rows = db.prepare(
+      `SELECT street, housenumber, lat, lon FROM addresses
+        WHERE lat BETWEEN ? AND ? AND lon BETWEEN ? AND ?`,
+    ).all(lat - dLat, lat + dLat, lon - dLon, lon + dLon) as typeof rows;
+  } catch { return null; }  // a map without the fabric still searches
+  let best: StreetWitness | null = null;
+  for (const a of rows) {
+    const street = String(a.street ?? '').trim();
+    if (!street) continue;
+    const d = distM(lat, lon, a.lat, a.lon);
+    if (d > maxM) continue;
+    if (!best || d < best.d) best = { street, housenumber: String(a.housenumber ?? ''), d };
+  }
+  return best;
+}
+
+/** The query one row's search spends. The street, when the pin has one, keeps
+ *  Google inside this quarter; without it the answer is the flagship branch. */
+export function buildIdentityQuery(name: string, street: string | null | undefined): string {
+  const s = String(street ?? '').trim();
+  return s ? `${name}, ${s}, Скопје` : `${name}, Скопје`;
+}
+
+/** The map window the query is biased to: one quarter for a street-qualified
+ *  query, the whole city for a name-only one. */
+export const QUERY_ZOOM_STREET = 16;
+export const QUERY_ZOOM_CITY = 15;
+
 /** A name worth spending a search on: real letters, not a placeholder. OSM
  *  rows carry «Непозната», «unknown», «-» and bare numbers. */
 export function isLandmarkName(name: string): boolean {

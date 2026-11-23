@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
 import {
   selectIdentityTargets, acceptIdentity, writeIdentity, hasIdentifiedTwin, identityCoverage,
-  isLandmarkName, ANCHOR_CLASSES, MATCH_RADIUS_M, type IdentityCapture, type IdentityTarget,
+  isLandmarkName, ANCHOR_CLASSES, MATCH_RADIUS_M, pinStreetWitness, buildIdentityQuery,
+  type IdentityCapture, type IdentityTarget,
 } from '../src/geo/identityBackfill';
 
 // A tiny map around 42.00 / 21.43 (Skopje centre-ish). ~0.001° lat = 111 m.
@@ -14,6 +15,7 @@ function makeDb(): Database.Database {
     name TEXT, type TEXT, lat REAL, lon REAL, source TEXT,
     place_id TEXT, review_count INTEGER, rating REAL, plus_code TEXT,
     phone TEXT, website TEXT, price_level TEXT, closed INTEGER, types TEXT, place_url TEXT)`);
+  db.exec(`CREATE TABLE addresses (street TEXT, housenumber TEXT, lat REAL, lon REAL, key TEXT, source TEXT)`);
   return db;
 }
 
@@ -208,4 +210,48 @@ test('coverage: counts the pool and the thin classes it exists for', () => {
   assert.equal(cov.withIdentity, 1);
   assert.equal(cov.poolMissing, 1);
   assert.equal(cov.classMissing, 1);
+});
+
+// ── THE QUERY THE PASS SPENDS (the 2026-11-23 too-far investigation) ─────────
+// The pool search was city-wide («Стопанска Банка, Скопје»), so Google answered
+// with the flagship branch — the head office 1 696 m away — and the identity was
+// refused as too far. The street the map's OWN fabric records at the pin makes
+// the same query return the branch at 0 m. These tests pin that witness.
+
+function addAddr(db: Database.Database, street: string, num: string, lat: number, lon: number): void {
+  db.prepare('INSERT INTO addresses (street, housenumber, lat, lon, key, source) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(street, num, lat, lon, `${street}|${num}`, 'osm');
+}
+
+test('pinStreetWitness: the house number at the pin is the street the query names', () => {
+  const db = makeDb();
+  // ~22 m north of the pin: Булевар Јане Сандански 62 (the Стопанска branch).
+  addAddr(db, 'Булевар Јане Сандански', '62', 42.0002, 21.43);
+  const w = pinStreetWitness(db, 42.0, 21.43);
+  assert.deepEqual(w && { street: w.street, housenumber: w.housenumber }, {
+    street: 'Булевар Јане Сандански', housenumber: '62',
+  });
+  assert.ok(w && w.d < 40);
+  // The nearest number wins when the pin stands between two of them.
+  addAddr(db, 'Атинска', '4', 42.00005, 21.43);
+  assert.equal(pinStreetWitness(db, 42.0, 21.43)?.street, 'Атинска');
+});
+
+test('pinStreetWitness: a number across the quarter is NOT the row\'s street', () => {
+  const db = makeDb();
+  // ~110 m away: far enough that the number describes another building, so the
+  // query keeps the honest city-wide form instead of inventing a street.
+  addAddr(db, 'Булевар Партизански одреди', '59', 42.001, 21.43);
+  assert.equal(pinStreetWitness(db, 42.0, 21.43), null);
+  // A map with no fabric at all still searches (the table is optional).
+  const bare = new Database(':memory:');
+  bare.exec('CREATE TABLE pois (rowid INTEGER PRIMARY KEY, name TEXT, type TEXT, lat REAL, lon REAL)');
+  assert.equal(pinStreetWitness(bare, 42.0, 21.43), null);
+});
+
+test('buildIdentityQuery: the street steers the query, its absence is the city form', () => {
+  assert.equal(buildIdentityQuery('Стопанска Банка', 'Булевар Јане Сандански'),
+    'Стопанска Банка, Булевар Јане Сандански, Скопје');
+  assert.equal(buildIdentityQuery('Стопанска Банка', null), 'Стопанска Банка, Скопје');
+  assert.equal(buildIdentityQuery('Стопанска Банка', '  '), 'Стопанска Банка, Скопје');
 });

@@ -42,6 +42,28 @@
  *     for the next two runs (a name Google cannot match will not start matching
  *     tomorrow, and a repeated miss spends quota for nothing).
  *
+ * THE QUERY NAMES THE STREET WHEN THE FABRIC PUTS ONE AT THE PIN. The
+ * 2026-11-23 investigation of the 79 too-far refusals found the cause was the
+ * QUESTION, not the radius: `«Стопанска Банка, Скопје»` is a city-wide name
+ * search, so Google answered with the best-known branch — the head office
+ * 1 696 m away — and the identity was refused for standing too far from the
+ * row. `«Стопанска Банка, Булевар Јане Сандански, Скопје»` returns the branch
+ * sitting ON the row (0 m); the same for «Рептил» (3.8 km → its own branch at
+ * 4.2★). The street comes from OUR OWN address fabric at the row's pin, never
+ * from the candidate, so nothing about Google steers its own search.
+ *
+ * The rest of that family is the rule being RIGHT, and the numbers say so: of
+ * the 148 too-far refusals, 69 share no distinctive word with the card, 33 have
+ * the row's pin confirmed on its own house number (the card is somewhere else),
+ * 4 matched a known branch row, and NONE had Google's pin standing on an
+ * unidentified sibling row of the same place. Re-running the whole 78-row
+ * population with the street query cost 64 searches and converted 5 (6 %): the
+ * branches Google actually indexes. That is the ceiling for this class — a name
+ * search cannot conjure a card Google does not publish — so do not re-open it,
+ * and do not raise MATCH_RADIUS_M to "fix" it: the refused names include
+ * «Општина Карпош» ⇄ «Karpoš» and two «Св. Јован Крстител» churches in different
+ * quarters, which the radius is what keeps apart.
+ *
  * EXIT CODE: 0 = the run did what it planned; 1 = no key could search (or the
  * plan was non-empty and nothing was attempted) — never a silent no-op.
  */
@@ -58,6 +80,7 @@ import { capturePoi, type CapturedPoi } from '../src/geo/serpCapture';
 import { createSerpClient, loadSerpApiKeys, remainingLeft } from '../src/geo/serpApi';
 import {
   selectIdentityTargets, acceptIdentity, writeIdentity, identityCoverage, hasIdentifiedTwin,
+  pinStreetWitness, buildIdentityQuery, QUERY_ZOOM_STREET, QUERY_ZOOM_CITY,
   ANCHOR_CLASSES, POOL_RADIUS_M, type IdentityOrigin, type IdentityTarget,
 } from '../src/geo/identityBackfill';
 
@@ -91,6 +114,10 @@ const SHARD = SHARD_RAW ? (() => {
 })() : null;
 const KEY_ONLY = val('--key') !== undefined ? parseInt(val('--key')!, 10) : null;
 const RETRY_MISSES = has('--retry-misses');
+// Re-run only the refusals of ONE reason (`--why=too-far`). After a rule change
+// the population it targets is the refusals it already recorded — re-searching
+// the whole pool to reach them would spend quota on rows that are fine.
+const WHY_ONLY = val('--why');
 const BUDGET_FLOOR = 20;
 const PACE_MS = 1100;
 const MISS_FILE = path.join(
@@ -191,6 +218,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
     + `(missing ${cov.poolMissing}); anchor classes missing identity: ${cov.classMissing}`);
 
   const misses = loadMisses();
+  if (WHY_ONLY) targets = targets.filter(t => misses[String(t.rowid)]?.why === WHY_ONLY);
   const blocked = (rowid: number) => !RETRY_MISSES && (misses[String(rowid)]?.attempts ?? 0) >= MISS_MAX_ATTEMPTS;
   const beforeBlocked = targets.filter(t => blocked(t.rowid)).length;
   targets = targets.filter(t => !blocked(t.rowid));
@@ -241,7 +269,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
   let noResponse = 0;
   let twins = 0;
   const whyCount: Record<string, number> = {};
-  const refusals: Array<{ name: string; why: string; candidate?: string; movedM?: number }> = [];
+  const refusals: Array<{ name: string; why: string; candidate?: string; movedM?: number; query?: string }> = [];
 
   for (const t of targets) {
     if (spent >= runCap) { log(`  ⚠ cap (${runCap}) reached — stopping`); break; }
@@ -249,8 +277,13 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
 
     // The neighbouring row already knows this place — no search needed.
     if (hasIdentifiedTwin(db, t)) { twins++; continue; }
-    const ll = `@${t.lat},${t.lon},15z`;
-    const data = await search(`${t.name}, Скопје`, ll);
+    // THE QUERY NAMES THE STREET WHEN OUR OWN FABRIC PUTS ONE AT THE PIN: a
+    // city-wide name search answers with the flagship branch (the too-far
+    // family), a street-qualified one answers about this branch.
+    const witness = pinStreetWitness(db, t.lat, t.lon);
+    const query = buildIdentityQuery(t.name, witness?.street);
+    const ll = `@${t.lat},${t.lon},${witness ? QUERY_ZOOM_STREET : QUERY_ZOOM_CITY}z`;
+    const data = await search(query, ll);
     spent++;
     if (data == null) {
       noResponse++;
@@ -296,7 +329,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
       const why = best && !best.verdict.ok ? best.verdict.why : 'no-results';
       whyCount[why] = (whyCount[why] ?? 0) + 1;
       const movedM = best && !best.verdict.ok ? best.verdict.movedM : undefined;
-      refusals.push({ name: t.name, why, candidate: best?.cap.name, movedM });
+      refusals.push({ name: t.name, why, candidate: best?.cap.name, movedM, query });
       misses[String(t.rowid)] = {
         attempts: (misses[String(t.rowid)]?.attempts ?? 0) + 1,
         why, candidate: best?.cap.name, last: new Date().toISOString(),
@@ -325,7 +358,7 @@ if (typeof LIMIT === 'number') targets = targets.slice(0, LIMIT);
     // map's own pin and Google disagree about where the place is.
     const byMoved = [...refusals].filter(r => (r.movedM ?? 0) > 0).sort((a, b) => (b.movedM ?? 0) - (a.movedM ?? 0));
     for (const r of byMoved.slice(0, 12)) {
-      log(`  ⚠ refused (${r.why}, ${r.movedM} m): «${r.name}» → «${r.candidate ?? '(no result)'}»`);
+      log(`  ⚠ refused (${r.why}, ${r.movedM} m): «${r.name}» → «${r.candidate ?? '(no result)'}» [q: «${r.query ?? ''}»]`);
     }
     const names = refusals.filter(r => r.why === 'not-same-place').slice(0, 8);
     if (names.length > 0) {
