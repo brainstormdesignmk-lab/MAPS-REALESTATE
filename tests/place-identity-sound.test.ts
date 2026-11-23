@@ -66,6 +66,21 @@ test('a category word is never the evidence (the Caffe Skopje case)', () => {
   assert.equal(samePlaceName('Сити Мол', 'Ramstore - City Mall', 35, false, true).same, true);
 });
 
+test('a DENOMINATION is a category too (the 2026-11-23 bad weld)', () => {
+  // The anchor-class backfill welded «Св. 40. Маченици» onto a Google card named
+  // exactly «Orthodox Church»: 'church' was in the kind list, 'orthodox' was
+  // not, so a name that identifies nothing supplied the "distinctive" word and
+  // 8 reviews / 5★ landed on a row whose place was never proven.
+  assert.equal(samePlaceName('Св. 40. Маченици', 'Orthodox Church', 60, false, true).same, false);
+  assert.equal(samePlaceName('Св. Петка', 'Catholic Cathedral', 60, false, true).same, false);
+  // The real name still binds: «Петка» is the identity, not «church». (The
+  // ABBREVIATION is a separate gap — «св»/«света»/«st» are three tokens, so
+  // «Св. Петка» ⇄ «Света Петка» still does not bind. Pinned here so the day the
+  // lexicon learns it, this expectation moves deliberately.)
+  assert.equal(samePlaceName('Св. Петка', 'Света Петка', 60, false, true).same, false);
+  assert.equal(samePlaceName('Св. Петка', 'Св. Петка', 60, false, true).same, true);
+});
+
 test('sound tier: proximity is NOT evidence — a neighbour keeps its own slot', () => {
   // Two pharmacies 13 m apart in one building (real rows): different names.
   assert.equal(samePlaceName('Аптека Артемизија', 'Аптека Betty', 13).same, false);

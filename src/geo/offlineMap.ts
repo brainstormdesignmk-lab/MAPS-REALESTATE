@@ -1745,6 +1745,12 @@ export const GENERIC_VENUE_TOKENS: ReadonlySet<string> = new Set([
   // for the identity tiers — dropping them while composing the set would have
   // quietly re-opened the «Corporate office» hole.
   'office', 'kancelarija',
+  // A DENOMINATION IS A KIND TOO. The 2026-11-23 backfill welded «Св. 40.
+  // Маченици» onto a Google card named exactly «Orthodox Church»: 'church' was
+  // generic, 'orthodox' was not, so a name that identifies NOTHING supplied the
+  // "distinctive" word. The same holds for every rite and building type.
+  'orthodox', 'catholic', 'protestant', 'evangelical', 'christian', 'muslim',
+  'cathedral', 'chapel', 'parish', 'temple', 'tekke', 'tekija', 'synagogue',
 ]);
 
 /** The ONE distinctive token a containment needs: long enough to be a name, and

@@ -25,7 +25,8 @@
     "school or embassy on that test. A private company office fails it: the",
     "client cannot walk to 'кај Kantar Brima'.",
     "  pinfixes  — move ONE row's pin without losing its place_id/rating",
-    "              (a capture may refine a pin, never relocate the place)"
+    "              (a capture may refine a pin, never relocate the place)",
+    "  deidentify — strip a Google identity the accept rule should never have\n               welded to this row (the card's name was a KIND, or the row is a\n               different place); keeps the correction across OSM rebuilds"
   ],
   "excluded": [
     {
@@ -153,6 +154,13 @@
       "street": "Гуро Ѓоновиќ",
       "osmStreet": "Ѓуро Ѓаковиќ",
       "note": "EB 91 — shorter variant of the same garbled name"
+    }
+  ],
+  "deidentify": [
+    {
+      "name": "Св. 40. Маченици",
+      "place_id": "0x13543fa87a9f5c7f:0x91c21373de4f56dd",
+      "note": "the welded Google card is named «Orthodox Church» — a kind, not a place; rejected 2026-11-23 after the denomination words joined the kind list"
     }
   ]
 }

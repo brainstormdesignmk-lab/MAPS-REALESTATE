@@ -10,6 +10,10 @@
 //   addresses — individual house numbers missing from OSM
 //   pinfixes  — move one row's pin, keeping its place_id/rating (a capture may
 //               refine a pin, never relocate the place — see captureMayMovePin)
+//   deidentify — strip a Google identity the accept rule should never have
+//               welded to this row (kept here so the correction survives the
+//               weekly OSM rebuild, and so the rejection is recorded next to
+//               the row it is about instead of living in someone's memory)
 //   aliases   — feed spelling differs from OSM spelling
 //
 // Usage: npx tsx scripts/apply_overrides.ts
@@ -23,6 +27,7 @@ interface OverrideFile {
   replaces?: Array<{ name: string; type: string; lat: number; lon: number; note?: string }>;
   addresses?: Array<{ street: string; housenumber: string; lat: number; lon: number; note?: string }>;
   pinfixes?: Array<{ name: string; type?: string; lat: number; lon: number; note?: string }>;
+  deidentify?: Array<{ name: string; type?: string; place_id?: string; note?: string }>;
   aliases?: Array<{ street: string; osmStreet: string; note?: string }>;
 }
 
@@ -74,6 +79,34 @@ function main() {
     }
     console.log(`~ pin   ${f.name}${f.type ? ` [${f.type}]` : ''} @ ${f.lat},${f.lon} (${where.changes} row${where.changes === 1 ? '' : 's'})${f.note ? ` — ${f.note}` : ''}`);
     added++;
+  }
+
+  // --- Deidentify (remove a witness the rule now refuses) ------------------
+  // The 2026-11-23 backfill gave «Св. 40. Маченици» the identity of a Google
+  // card called «Orthodox Church»: the card's name identified nothing, and the
+  // denomination word was not yet in the kind list. `place_id` on a row is
+  // believed by the reader (rating, reviews, closed flag), so the bad weld has
+  // to be removed, not merely stopped.
+  for (const d of ov.deidentify ?? []) {
+    const rows = (d.type
+      ? db.prepare('SELECT rowid, name FROM pois WHERE name = ? AND type = ?').all(d.name, d.type)
+      : db.prepare('SELECT rowid, name FROM pois WHERE name = ?').all(d.name)) as Array<{ rowid: number; name: string }>;
+    if (rows.length === 0) {
+      console.warn(`! deidentify skipped (${d.name}): no such row`);
+      continue;
+    }
+    for (const r of rows) {
+      const cur = db.prepare('SELECT place_id FROM pois WHERE rowid = ?').get(r.rowid) as { place_id: string | null };
+      if (!cur.place_id) { skipped++; continue; }
+      if (d.place_id && cur.place_id !== d.place_id) {
+        console.warn(`! deidentify skipped (${d.name}): identity is ${cur.place_id}, not the recorded ${d.place_id}`);
+        continue;
+      }
+      // `closed` is NOT NULL DEFAULT 0 — an unstamped row is open, not unknown.
+      db.prepare('UPDATE pois SET place_id = NULL, review_count = NULL, rating = NULL, closed = 0 WHERE rowid = ?').run(r.rowid);
+      console.log(`~ deidentify ${d.name}: removed ${cur.place_id}${d.note ? ` — ${d.note}` : ''}`);
+      added++;
+    }
   }
 
   // --- Addresses ----------------------------------------------------------
