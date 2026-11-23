@@ -83,6 +83,31 @@ test('cleanPoiName: collapses padded whitespace and heals the artifact', () => {
   assert.equal(cleanPoiName('Кафе бар Ван Гог'), 'Кафе бар Ван Гог');
 });
 
+// A ROMAN QUARTER NUMERAL IS THE SAME NASELBA, SPELLED TWO WAYS (2026-11-23).
+// The feed writes «Карпош III» / «Карпош IV»; the map files «Карпош 3» / «Карпош
+// 4». Two live feed rows (EB 48, 54) were unjudgeable by the pin audit — "the
+// map has no row for that naselba" — for naselbas the map HAS.
+test('cleanPoiName: a Roman quarter numeral folds to the map’s Arabic form', () => {
+  assert.equal(cleanPoiName('Карпош III'), 'Карпош 3');
+  assert.equal(cleanPoiName('Карпош IV'), 'Карпош 4');
+  assert.equal(cleanPoiName('Карпош 3'), 'Карпош 3', 'the map’s own spelling is untouched');
+  // NOT numerals: a Latin single-letter name, a non-canonical reading, and a
+  // name with no Cyrillic text at all are left alone.
+  assert.equal(cleanPoiName('C Lounge'), 'C Lounge');
+  assert.equal(cleanPoiName('VX Bar'), 'VX Bar', '«VX» is not a Roman numeral');
+  assert.equal(cleanPoiName('Hotel Continental I'), 'Hotel Continental I');
+});
+
+test('cleanPoiName: the fold is SYMMETRIC, so the lookup answers either spelling', () => {
+  const dbPath = path.join(os.tmpdir(), `maps-roman-${Date.now()}-${Math.random().toString(36).slice(2)}.db`);
+  writeMap(dbPath, [{ name: 'Карпош 3', type: 'suburb', lat: 42.0074, lon: 21.3987 }], []);
+  const store = new OfflineMapStore(dbPath);
+  const roman = store.findPoiByName('Карпош III', { lat: 42.0062, lon: 21.4 });
+  assert.equal(roman?.name, 'Карпош 3', 'the Roman spelling finds the quarter the map holds');
+  assert.deepEqual(roman, store.findPoiByName('Карпош 3', { lat: 42.0062, lon: 21.4 }));
+  store.close();
+});
+
 test('the map build stores healed names, so a rebuild cannot reintroduce them', () => {
   const dbPath = tmpDb();
   writeMap(dbPath, [

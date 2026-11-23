@@ -281,18 +281,69 @@ export function repairMixedScript(s: string): string {
   });
 }
 
-/** The canonical STORED/COMPARED form of a POI name: whitespace collapsed and
- *  mixed-script homoglyph artifacts healed. Applied when the map is built (so
- *  a weekly rebuild cannot reintroduce them) and on both sides of a name
- *  match (a row written by an older build must stay findable by an honest
- *  Cyrillic query). Display-only concerns stay in displayPlaceName. */
+/** The canonical STORED/COMPARED form of a POI name: whitespace collapsed,
+ *  mixed-script homoglyph artifacts healed, and a Roman quarter numeral written
+ *  the way the map writes it. Applied when the map is built (so a weekly
+ *  rebuild cannot reintroduce them) and on both sides of a name match (a row
+ *  written by an older build must stay findable by an honest Cyrillic query).
+ *  Display-only concerns stay in displayPlaceName. */
 export function cleanPoiName(name: string): string {
   const s = String(name ?? '');
   // The whitespace tidy allocates; only pay for it when the row needs it
   // (this runs per row on the findPoiByName scan, ~6k rows per call).
   // [^\S ] = any whitespace that is not a plain space (tab/newline).
   const tidy = /^\s|\s$|\s{2,}|[^\S ]/.test(s) ? s.replace(/\s+/g, ' ').trim() : s;
-  return repairMixedScript(tidy);
+  return romanQuarterToArabic(repairMixedScript(tidy));
+}
+
+/** The Roman numerals a Skopje naselba is actually numbered with. */
+const ROMAN_VALUES: Record<string, number> = { I: 1, V: 5, X: 10, L: 50, C: 100, D: 500, M: 1000 };
+
+/** ROMAN QUARTER NUMERALS ARE THE SAME PLACE, SPELLED TWO WAYS.
+ *
+ *  The feed carries «Карпош III» (and «Карпош IV»), the map carries «Карпош 3» —
+ *  so the pin audit could not judge those rows at all (`the map has no row for
+ *  that naselba`), and any reader that looked the naselba up in the map failed
+ *  the same way. It is ONE name: the Roman numeral is a quarter marker, not a
+ *  different word.
+ *
+ *  What is converted, and what is deliberately not:
+ *   • a STANDALONE token of at least two Roman letters (II, III, IV, XII) in a
+ *     name that also carries Cyrillic — «Карпош III» → «Карпош 3». Two letters
+ *     is the length that keeps real Latin names out («C Lounge», «D Bar» stay),
+ *     and the Cyrillic guard keeps an English name's «IV» out as well;
+ *   • a VALID numeral only (canonical ordering, at most one smaller symbol
+ *     before a larger one) — «DIX» is a word, not 509.
+ *  The fold is symmetric (both the map row and the query go through it), so a
+ *  name that is not converted on one side is not converted on the other. */
+export function romanQuarterToArabic(name: string): string {
+  if (!CYRILLIC_CHAR_RE.test(name)) return name;
+  return name.replace(/(^|[^A-Za-z])([IVXLCDM]{2,6})(?![A-Za-z])/gu, (m, lead: string, tok: string) => {
+    const n = romanValue(tok);
+    return n === undefined ? m : `${lead}${n}`;
+  });
+}
+
+/** A strict Roman numeral reading, or undefined when the token is not one. */
+function romanValue(tok: string): number | undefined {
+  let total = 0;
+  let prev = 0;
+  for (let i = tok.length - 1; i >= 0; i--) {
+    const v = ROMAN_VALUES[tok[i]!];
+    if (v === undefined) return undefined;
+    total += v < prev ? -v : v;
+    prev = Math.max(prev, v);
+  }
+  // Canonical round trip: «IIII» and «VX» are not numerals.
+  return toRoman(total) === tok ? total : undefined;
+}
+
+function toRoman(n: number): string {
+  const table: Array<[number, string]> = [[1000, 'M'], [900, 'CM'], [500, 'D'], [400, 'CD'],
+    [100, 'C'], [90, 'XC'], [50, 'L'], [40, 'XL'], [10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
+  let out = '';
+  for (const [v, s] of table) while (n >= v) { out += s; n -= v; }
+  return out;
 }
 
 /** The same healing for the map's STREET names (addresses table). A street
@@ -2769,8 +2820,14 @@ export class OfflineMapStore {
   /** PUBLIC LOOKUP — the exact passes first, then the SCHOOL-NAME bridge.
    *  The bridge runs ONLY after the core missed, so it can never displace an
    *  exact, alias, prefix or substring hit (same contract as the typo pass). */
-  findPoiByName(name: string, center?: { lat: number; lon: number }): PoiHit | undefined {
-    if (!name) return undefined;
+  findPoiByName(rawName: string, center?: { lat: number; lon: number }): PoiHit | undefined {
+    if (!rawName) return undefined;
+    // THE NEEDLE IS FOLDED LIKE THE ROWS ARE: the map stores «Карпош 3» and a
+    // feed row or a client writes «Карпош III», so the query takes the same
+    // canonical form `cleanPoiName` gives the map (a Roman quarter numeral).
+    // Without this the row could not be judged at all — «the map has no row for
+    // that naselba» for a naselba the map has.
+    const name = romanQuarterToArabic(rawName);
     // MEMOIZED: a turn asks for the same landmark several times (the stock-at-
     // place lane, the distance answer, the coverage sweep), and the answer is
     // deterministic while the map does not change. A remembered MISS is cached
