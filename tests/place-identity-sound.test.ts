@@ -55,6 +55,17 @@ test('sound tier: the city name never makes two places one', () => {
   assert.equal(samePlaceName('Аеродром Скопје', 'Скопје Север', 30).same, false);
 });
 
+test('a category word is never the evidence (the Caffe Skopje case)', () => {
+  // «Caffe Skopje» folds to exactly {caffe} once the city word is dropped.
+  // Without the distinctive-token rule the containment tier accepted ANY café
+  // whose name contains «Coffee» within 40 m — a stranger's reviews and
+  // coordinates stapled to a generically-named row.
+  assert.equal(samePlaceName('Caffe Skopje', 'The Dude Specialty Coffee', 25, false, true).same, false);
+  assert.equal(samePlaceName('Кафе', 'Кафе Младост', 20, false, true).same, false);
+  // A real brand word still carries the identity.
+  assert.equal(samePlaceName('Сити Мол', 'Ramstore - City Mall', 35, false, true).same, true);
+});
+
 test('sound tier: proximity is NOT evidence — a neighbour keeps its own slot', () => {
   // Two pharmacies 13 m apart in one building (real rows): different names.
   assert.equal(samePlaceName('Аптека Артемизија', 'Аптека Betty', 13).same, false);

@@ -1718,6 +1718,30 @@ export function hasIdentityQualifier(name: string): boolean {
 
 export type PlaceAgreementTier = 'token' | 'sound' | 'subset' | 'embassy' | 'none';
 
+/** WHAT KIND OF PLACE IT IS IS NOT WHICH ONE IT IS. A token that only names the
+ *  CATEGORY (a café, a market, a pharmacy) can never be the distinctive
+ *  evidence that two names describe one place: «Caffe Skopje» folds to exactly
+ *  {caffe}, and the containment tier then accepted ANY café whose name contains
+ *  «Coffee» within 40 m — the review pass surfaced it as «Caffe Skopje» ≡ «The
+ *  Dude Specialty Coffee». A name made only of such words carries no identity
+ *  at all, so it stays out of every tier that needs one distinctive word. */
+export const GENERIC_VENUE_TOKENS = new Set([
+  'kafe', 'caffe', 'cafe', 'coffee', 'kafic', 'kafana', 'bar', 'pub', 'restoran', 'restaurant',
+  'market', 'marketa', 'marketi', 'supermarket', 'mall', 'mol', 'shop', 'prodavnica', 'butik',
+  'boutique', 'store', 'hotel', 'motel', 'hostel', 'bank', 'banka', 'apteka', 'apoteka',
+  'pharmacy', 'bolnica', 'hospital', 'klinika', 'clinic', 'ambulanta', 'skola', 'school',
+  'uciliste', 'fakultet', 'pazar', 'pazare', 'pazarce', 'pekara', 'bakery', 'pizzeria', 'pizza',
+  'grill', 'kebab', 'burek', 'klub', 'club', 'lounge', 'office', 'kancelarija', 'park', 'parking',
+  'garaza', 'stanica', 'station', 'terminal', 'aerodrom', 'sportska', 'sportski', 'stadion',
+]);
+
+/** The ONE distinctive token a containment needs: long enough to be a name, and
+ *  not merely the category. */
+export function hasDistinctiveToken(tokens: Iterable<string>): boolean {
+  for (const t of tokens) if (t.length >= 4 && !GENERIC_VENUE_TOKENS.has(t)) return true;
+  return false;
+}
+
 /** THE SOUND SKELETON OF ONE IDENTITY TOKEN. `identityTokens` already folds
  *  SCRIPT (кийрилица → Latin) but not SPELLING, so «Рамстор»/«Ramstore» and
  *  «Сити»/«City» were still two different keys. `canonicalWordKey` is the map's
@@ -1824,7 +1848,7 @@ export function samePlaceName(
   // the missing words are unproven.
   const soundSame = qualifierAgrees
     && distanceM <= IDENTITY_SOUND_RADIUS
-    && [...ta, ...tb].some(t => t.length >= 4)
+    && hasDistinctiveToken(ta)
     && soundBijection(ta, tb);
   if (soundSame) return { same: true, tier: 'sound' };
 
@@ -1834,7 +1858,7 @@ export function samePlaceName(
     || soundContained(ta, tb) || soundContained(tb, ta);
   const smaller = ta.size <= tb.size ? ta : tb;
   const larger = ta.size <= tb.size ? tb : ta;
-  const distinctive = [...smaller].some(t => t.length >= 4);
+  const distinctive = hasDistinctiveToken(smaller);
   // A BRANCH NUMBER is the only thing the larger name adds ("Веро Центар" vs
   // "Веро 9", 14m apart): the digit identifies WHICH shop, not a spelling of
   // the same one. "Бит Пазар" vs "Бит Пазар 1" already stay apart by the token
