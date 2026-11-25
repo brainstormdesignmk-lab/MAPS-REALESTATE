@@ -99,8 +99,8 @@ function feedRosterSlots(
   p: PropertyRow,
   map: OfflineMapStore | undefined,
   center: Center,
-): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
-  const out: Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
+): Array<{ landmark: string; lat: number; lon: number; type?: string; place_url?: string; place_id?: string }> {
+  const out: Array<{ landmark: string; lat: number; lon: number; type?: string; place_url?: string; place_id?: string }> = [];
   const seen = new Set<string>();
   // A claim is only honest when it can be MEASURED. The declared distance_m
   // stored in the feed is not evidence: it was written at import time from a
@@ -120,6 +120,11 @@ function feedRosterSlots(
     let lon = pin?.lon;
     let place_url: string | undefined;
     let place_id: string | undefined;
+    // THE PLACE'S CLASS, carried out with the name: a follow-up may refer to the
+    // place the chat just named by its TYPE («на колкаво растојание е од
+    // ГРАДИНКАВА?»), and only the class tells that reference apart from a name
+    // the map can look up (see placeTypesFromNoun at the handler).
+    let type: string | undefined = e?.type ? String(e.type) : undefined;
     let poi: ReturnType<OfflineMapStore['findPoiByName']>;
     if (map?.available) {
       poi = map.findPoiByName(name, near);
@@ -127,6 +132,7 @@ function feedRosterSlots(
         if (lat == null || lon == null) { lat = poi.lat; lon = poi.lon; }
         place_url = poi.place_url;
         place_id = poi.place_id;
+        type = poi.type ?? type;
       }
     }
     // A SHOP IS NOT A PLACE (the owner's rule, the EB 53 capture): the roster
@@ -146,6 +152,7 @@ function feedRosterSlots(
       lon = complex.lon;
       place_url = complex.place_url;
       place_id = complex.place_id;
+      type = complex.type ?? type;
       // The slot now names the COMPLEX: enclosingComplex only ever returns a
       // mall-ranked or centre-named building, i.e. a place that passes the
       // claim rule by construction. Judging it by the tenant's row (a shop in
@@ -207,7 +214,7 @@ function feedRosterSlots(
       continue;
     }
     seen.add(key);
-    out.push({ landmark: name, lat, lon, place_url, place_id });
+    out.push({ landmark: name, lat, lon, type, place_url, place_id });
   }
   return out;
 }
@@ -1085,7 +1092,7 @@ export class LandmarkService {
    *  queue and returns empty — the handler serves an honest fallback.
    *  Client-facing claims are capped at FEED_LANDMARK_MAX_M (200 m), and the
    *  order inside that ring is significance-first. */
-  nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; place_url?: string; place_id?: string }> {
+  nearbyLandmarks(p: PropertyRow): Array<{ landmark: string; lat: number; lon: number; type?: string; place_url?: string; place_id?: string }> {
     const center = resolveSearchCenter(p);
 
     // CENTRE MISMATCH → queue the property so the FEED gets repaired, not just
@@ -1158,7 +1165,7 @@ export class LandmarkService {
     // closer pharmacy — see OfflineMapStore.nearestPois). No adaptive
     // widening: 200 m IS the claim, so a sparse block gets fewer names rather
     // than a farther place presented as "nearby".
-    let found: Array<{ name: string; distance_m: number; lat: number; lon: number; place_url?: string; place_id?: string }> = [];
+    let found: Array<{ name: string; distance_m: number; lat: number; lon: number; type?: string; place_url?: string; place_id?: string }> = [];
     if (this.opts.offlineMap?.available) {
       found = this.opts.offlineMap.nearestPois(center.lat, center.lon, FEED_LANDMARK_MAX_M, 50)
         .filter(poi => poi.distance_m <= FEED_LANDMARK_MAX_M && poi.lat != null && poi.lon != null)
@@ -1173,7 +1180,7 @@ export class LandmarkService {
         // nothing (see admitsLandmarkClaim).
         .filter(poi => admitsLandmarkClaim(poi))
         .slice(0, 3)
-        .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
+        .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, type: poi.type, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
     }
 
     // FEED LANDMARK PAIRS (the doc's zero-cost add): the feed's own
@@ -1192,7 +1199,7 @@ export class LandmarkService {
         // the copy mentioned it.
         const dM = Math.round(_distM(center.lat, center.lon, d.lat, d.lon));
         if (dM > FEED_LANDMARK_MAX_M) continue;
-        found.push({ name: d.name, distance_m: dM, lat: d.lat, lon: d.lon, place_url: d.place_url, place_id: undefined });
+        found.push({ name: d.name, distance_m: dM, lat: d.lat, lon: d.lon, type: undefined, place_url: d.place_url, place_id: undefined });
       }
     }
 
@@ -1211,6 +1218,66 @@ export class LandmarkService {
         `[${new Date().toISOString()}] EB ${p.eb}: NEARBY-EMPTY no POIs within ${FEED_LANDMARK_MAX_M}m → queue\n`); } catch {}
     }
 
-    return found.map(f => ({ landmark: f.name, lat: f.lat, lon: f.lon, place_url: f.place_url, place_id: f.place_id }));
+    return found.map(f => ({ landmark: f.name, lat: f.lat, lon: f.lon, type: f.type, place_url: f.place_url, place_id: f.place_id }));
+  }
+
+  /** THE CLAIM SCREEN for a stored feed roster (see PropertyService.
+   *  setLandmarkScreen).
+   *
+   *  The roster was ranked by DISTANCE at import, so EB 50 led with a pharmacy
+   *  in the flat's own building and the info block kept printing it — «Се
+   *  наоѓа во близина на ПЗУ Аптека Линцура 2» — while the answer to «каде?»
+   *  already named the kindergarten (the [12:27] capture). This returns the
+   *  entries a client could actually name, measured from the row's own centre:
+   *    • the roster entries that pass the claim rule (feedRosterSlots), with
+   *      their measured distance restored — the stored distance_m is the
+   *      import-time number, never evidence;
+   *    • when NONE survives, the places the map itself vouches for in the ring
+   *      (the same rotation the where-is lane serves), so the card keeps an
+   *      honest location line instead of a withdrawn one;
+   *    • undefined when nothing can be MEASURED (no map, no centre) — an
+   *      unmeasurable roster is not evidence of anything, so it is left alone.
+   *  The caller treats an unchanged array as "nothing to do" (identity). */
+  screenFeedLandmarks(p: PropertyRow): FeedLandmark[] | undefined {
+    const roster = p.landmarks ?? [];
+    if (roster.length === 0) return undefined;
+    if (!this.opts.offlineMap?.available) return undefined;
+    const center = resolveSearchCenter(p);
+    const usable = Number.isFinite(center.lat) && Number.isFinite(center.lon)
+      && (center.lat !== 0 || center.lon !== 0);
+    if (!usable) return undefined;
+    const kept = feedRosterSlots(p, this.opts.offlineMap, center);
+    if (kept.length > 0) {
+      const norm = (s: string): string => s.trim().toLowerCase();
+      const byName = new Map(kept.map(k => [norm(k.landmark), k]));
+      const out: FeedLandmark[] = [];
+      for (const e of roster) {
+        const k = byName.get(norm(stripPoiAnnotation(String(e?.landmark ?? ''))))
+          ?? byName.get(norm(String(e?.landmark ?? '')));
+        if (!k) continue;
+        out.push({
+          ...e,
+          landmark: k.landmark,
+          type: k.type ?? e.type,
+          distance_m: Math.round(_distM(center.lat, center.lon, k.lat, k.lon)),
+          maps_url: e.maps_url,
+        });
+      }
+      // (the same entries, same order → hand back the ORIGINAL array so the
+      // service's identity check can skip the clone. A slot the roster led with
+      // a SHOP can come back as the complex it stands in, so the names are
+      // compared too — only a byte-identical roster takes the fast path.)
+      const sameNames = out.length === roster.length
+        && out.every((e, i) => e.landmark === roster[i]?.landmark);
+      return sameNames ? roster : out;
+    }
+    const scan = this.nearbyLandmarks(p);
+    if (scan.length === 0) return [];
+    return scan.map(s => ({
+      landmark: s.landmark,
+      type: s.type ?? '',
+      distance_m: Math.round(_distM(center.lat, center.lon, s.lat, s.lon)),
+      maps_url: s.place_url,
+    }));
   }
 }

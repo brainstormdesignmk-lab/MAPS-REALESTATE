@@ -2608,7 +2608,7 @@ export class OfflineMapStore {
    *  Бисер», a shop inside it that Google also typed «Shopping mall»).
    *  Undefined when the shop is NOT inside one — the caller then drops it
    *  rather than serving a name nobody recognises. */
-  enclosingComplex(lat: number, lon: number, maxM = 250): { name: string; lat: number; lon: number; distance_m: number; place_url?: string; place_id?: string } | undefined {
+  enclosingComplex(lat: number, lon: number, maxM = 250): { name: string; lat: number; lon: number; distance_m: number; type?: string; place_url?: string; place_id?: string } | undefined {
     if (!this.db || !Number.isFinite(lat) || !Number.isFinite(lon)) return undefined;
     // distanceOnly keeps the significance sort out of the way: the question here
     // is purely "which complex is this shop standing in", and buildings one
@@ -2622,7 +2622,7 @@ export class OfflineMapStore {
     const pool = named.length > 0 ? named : around;
     pool.sort((a, b) => a.distance_m - b.distance_m);
     const hit = pool[0];
-    return { name: hit.name, lat: hit.lat as number, lon: hit.lon as number, distance_m: hit.distance_m, place_url: hit.place_url, place_id: hit.place_id };
+    return { name: hit.name, lat: hit.lat as number, lon: hit.lon as number, distance_m: hit.distance_m, type: hit.type, place_url: hit.place_url, place_id: hit.place_id };
   }
 
   /** The neighbourhood this point sits in, from the map's own OSM suburb

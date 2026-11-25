@@ -165,44 +165,49 @@ export function allowedLandmarkUrl(url: string | undefined | null): string | und
   return u;
 }
 
-// Landmark link — priority order (revised 2026-10-13, the [23:50] capture):
-//   1. A stored google.com/maps URL (canonical place_url from the capture
-//      script) — emitted verbatim, original Google.
-//   2. Coordinate pin via maps.google.com/?q=lat,lon (~44 chars) — DROPS A RED
-//      PIN on the exact spot. Now the PRIMARY landmark link. The cid form was
-//      primary until the operator reported what a client actually sees: "link
-//      with card for the landmark but no pin" — a place CARD tells the client
-//      which place it is, but not WHERE it is, and the reply already carries
-//      the landmark's name in text. The pin is also shorter (44 vs 46–49 chars)
-//      so it fits the narrowest supported chat pane, and it is ASCII-only.
-//   3. Google place_id → maps.google.com/?cid=<decimal> — the EXACT place card,
-//      now the FALLBACK for landmarks with no usable coordinate.
-// Name searches are BANNED: with no city context Google biases them by the
-// viewport/keywords and can return a results LIST at country zoom instead of a
-// pin (production bug: a "crna gora" embassy name-search opened a
-// Montenegro-wide list). The landmark's NAME is carried in the reply text,
-// never in the URL.
-// Never: tinyurl (third-party shortener — agency refuses it), never
-// percent-encoded Cyrillic name searches, never a name-only ?q=<name> search,
-// never a bare @-view (opens a map with no landmark).
+/** Is this an allowed link that carries only a POINT (a `?q=lat,lon` pin or an
+ *  `@lat,lon,zoom` view) — i.e. it names NO place? */
+export function isCoordinatePinUrl(url: string): boolean {
+  return /[?&]q=\s*-?\d+(?:\.\d+)?\s*,\s*-?\d+(?:\.\d+)?/i.test(url)
+    || /\/maps\/@-?\d+(?:\.\d+)?,-?\d+(?:\.\d+)?/i.test(url);
+}
+
+// Landmark link — CARD FIRST, PIN SECOND (the owner's rule, 2026-11-25).
+//
+// The [23:50] decision made the coordinate pin primary because a place CARD on
+// its own answers «which place?» but not «where?». The [12:27] field answer then
+// shipped «во близина на Kindergarten …» + a bare `?q=41.99727,21.41594` — and
+// the owner's verdict on it is the other half of the same coin: a pin with no
+// card names NOTHING (a dropped pin in a courtyard is not the kindergarten).
+// Neither form alone is an answer, so both are emitted when the map can give
+// them, each on its own line (each fits the console's ~50-char cut):
+//   1. the place CARD — a canonical `/maps/place/…` URL from the map/capture
+//      script, else Google's `?cid=<decimal>` deep-link from the POI's place_id;
+//   2. the coordinate PIN — the exact point, for «where do I walk?».
+// A landmark with no card identity keeps the pin alone (never a name search:
+// percent-encoded Cyrillic names get cut and open a country-wide result list).
+// Never tinyurl (third-party shortener — the agency refuses it), never
+// `?api=1&query=`, never a bare @-view.
 export function landmarkLink(name: string, placeId: string | null, lat: number, lon: number, placeUrl?: string): string {
-  void name; // name lives in the reply text, not in the URL
-  // BEST: a stored ORIGINAL Google URL (canonical place URL captured by
-  // scripts/capture-place-urls.ts). Only google.com/maps links are accepted —
-  // tinyurl/other shorteners are never emitted.
+  void name; // the name lives in the reply text, never in the URL
+  const lines: string[] = [];
+  // 1. THE CARD. A stored ORIGINAL Google URL (canonical place URL captured by
+  //    scripts/capture-place-urls.ts) is emitted verbatim — but only when it
+  //    really is a card: a stored `?q=lat,lon` is just the pin in another coat,
+  //    and the cid is the shorter, exact place identity.
   const curated = allowedLandmarkUrl(placeUrl);
-  if (curated) return curated;
-  // 1. Coordinate pin — deterministic, unambiguous, and the only form that
-  //    puts a MARKER on the map (the [23:50] decision: card-but-no-pin loses
-  //    to a pin that shows where the landmark is).
-  if (Number.isFinite(lat) && Number.isFinite(lon)) {
-    return `https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`;
-  }
-  // 2. No usable coordinate → the exact place card via cid (Google's own short
-  //    deep-link). Better the right place with no pin than nothing at all.
-  if (placeId) {
+  if (curated && !isCoordinatePinUrl(curated)) lines.push(curated);
+  if (lines.length === 0 && placeId) {
     const cid = cidLink(placeId);
-    if (cid) return cid;
+    if (cid) lines.push(cid);
   }
-  return '';
+  // 2. THE PIN, when the map has a usable point.
+  if (Number.isFinite(lat) && Number.isFinite(lon)) {
+    lines.push(`https://maps.google.com/?q=${lat.toFixed(5)},${lon.toFixed(5)}`);
+  } else if (lines.length === 0 && curated) {
+    // No point at all → the stored link as-is (allowed form), so a client still
+    // gets something rather than a sentence with no reference.
+    lines.push(curated);
+  }
+  return lines.join('\n');
 }
