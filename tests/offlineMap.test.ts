@@ -446,6 +446,15 @@ test('isShopLevelPlace + enclosingComplex: a tenant is never the landmark, its m
   assert.equal(isShopLevelPlace('Deni Market', 'Supermarket'), false);
   // A Google-typed tenant is caught by TYPE even without a shop word in its name.
   assert.equal(isShopLevelPlace('Galion', 'Clothing store'), true);
+  // A PHARMACY IS NOT A SHOP BY CLASS (deliberate, pinned): «кај аптеката» is
+  // how Skopje gives directions, and an EVIDENCED pharmacy is a landmark
+  // (tests/landmark-claim-relevance.test.ts). The [12:27] branch was refused by
+  // the CLAIM rule — its evidence and its own class, never the class of a
+  // same-name twin row (see `feedRosterSlots` in landmarks.ts).
+  assert.equal(isShopLevelPlace('Pharmacy Biser', 'Pharmacy'), false);
+  assert.equal(isShopLevelPlace('ПЗУ Аптека Линцура 2', 'Pharmacy'), false);
+  assert.equal(isShopLevelPlace('KAM', 'supermarket'), false);
+  assert.equal(isShopLevelPlace('Stokomak', 'Discount supermarket'), false);
 
   const dbPath = tmpDb();
   writeMap(dbPath, [

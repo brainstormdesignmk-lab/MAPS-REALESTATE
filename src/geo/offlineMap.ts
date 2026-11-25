@@ -690,7 +690,10 @@ export function placeCategory(name: string): string | undefined {
  *  FIRST WORD only („Shopping Center Capitol Mall“ is a complex, „Shop …“ is
  *  not) and on the small-shop Google/OSM types. Markets and pharmacies are
  *  deliberately NOT here: „кај Тинекс“ and „кај аптеката“ are how people give
- *  directions. */
+ *  directions, and a pharmacy with real evidence of being a corner people name
+ *  IS one (`tests/landmark-claim-relevance.test.ts` pins that). A nameless
+ *  pharmacy branch is refused by the CLAIM rule in `feedRosterSlots` — see the
+ *  entry-class rule there, which is what the [12:27] capture actually needed. */
 const SHOP_FIRST_WORDS = new Set([
   'butik', 'butika', 'butikot', 'boutique', 'бутик', 'shop', 'shoppe', 'шоп',
   'store', 'стор', 'kiosk', 'киоск', 'dukjan', 'dukan', 'дуќан', 'дуќанот',

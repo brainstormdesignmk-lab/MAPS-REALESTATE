@@ -203,7 +203,16 @@ function feedRosterSlots(
     if (map?.available && lat != null && lon != null) {
       const norm = (s: string): string => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
       const own = map.nearestPois(lat, lon, 40, 8).filter(po => norm(po.name) === norm(name));
-      if (own.length > 0 && !own.some(po => admitsLandmarkClaim(po))) {
+      // THE ENTRY'S OWN CLASS DECIDES DURABILITY, the twins donate only their
+      // EVIDENCE (the [12:27] sibling on EB 53): the map held TWO rows named
+      // «Pharmacy Biser» — the pharmacy (12 reviews) and a row typed «Shopping
+      // mall» (the data error). The mall's durable class lent its immunity to a
+      // storefront, and a 35 m pharmacy walked into the card. A twin that
+      // disagrees about WHAT the place is cannot upgrade it; a twin with more
+      // reviews still can (same place, richer page). No declared type → the
+      // map's own type stands, as before.
+      const declared = e?.type ? String(e.type) : own[0]?.type;
+      if (own.length > 0 && !own.some(po => admitsLandmarkClaim({ type: declared, review_count: po.review_count }))) {
         try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" (${own[0].type}, ${own[0].review_count ?? 0} review(s)) is not a place a client navigates by\n`); } catch {}
         continue;
       }
