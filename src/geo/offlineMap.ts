@@ -3868,9 +3868,67 @@ export class OfflineMapStore {
     // branches, all the same name — the nearest one answers. A tie between
     // DIFFERENT places one letter apart («KAM» / «KAN») stays a MISS.
     if (rows.length > 1 && extras(rows[0]) === extras(rows[1])) {
-      if (this.idKeyOf(rows[0]) !== this.idKeyOf(rows[1])) return undefined;
+      if (this.idKeyOf(rows[0]) !== this.idKeyOf(rows[1])) {
+        // ONE TYPO IN A NAME THE MAP ITSELF SPELLS SEVERAL TIMES (the [05:51]
+        // capture): «кај КАТОЛИШЧКА» is «Католичка црква» with one extra ш, and
+        // the map holds three rows named «Католичка црква …» — a temple of the
+        // same name family, not three places one letter apart. They tie on
+        // every rank above, so the branch rule answered MISS for a place the
+        // exact spelling resolves to ONE row. The tie is the MAP's naming, so
+        // the corrected spelling is put to the ordinary exact lookup and the
+        // answer is the row that exact name resolves to. Only a word NO tied
+        // row spells exactly is corrected — «KAM»/«KAN» still MISS, because
+        // «kam» IS a row's own spelling there.
+        const tied = rows.filter(r => extras(r) === extras(rows[0]));
+        const corrected = this.correctedTypoNeedle(clean, tied);
+        if (corrected) {
+          const exact = this.findPoiByNameCore(corrected, center);
+          const exactKey = exact ? identityKey(exact.name) : undefined;
+          // `findPoiByNameCore` is the core shape: `type` may be absent, so it is
+          // returned through the same defaulted field the public hit carries.
+          if (exact && tied.some(r => this.idKeyOf(r) === exactKey)) {
+            return { ...exact, type: exact.type ?? '' };
+          }
+        }
+        return undefined;
+      }
     }
     return rows[0];
+  }
+
+  /** THE CLIENT'S NEEDLE IN THE MAP'S OWN SPELLING — every word he typed is
+   *  replaced by the word of the tied rows it matched, and `undefined` unless at
+   *  least one word really was misspelled AND every tied row spells it the same
+   *  way. Two rows disagreeing on the word is genuine ambiguity, not a typo.
+   *  Used only to settle a typo tie (see typoBest). */
+  private correctedTypoNeedle(clean: string, tied: PoiIndexRow[]): string | undefined {
+    // EVERY TOKEN COUNTS — short ones are KEPT, never dropped: the typo filter
+    // ignores words under three letters, but a needle rebuilt without its «5»
+    // («Бунјаковац 5» → «Буњаковец») names a different place.
+    const qWords = clean.split(/[^0-9\p{L}]+/u).filter(Boolean);
+    if (qWords.length === 0 || tied.length === 0) return undefined;
+    const out: string[] = [];
+    let changed = false;
+    for (const qw of qWords) {
+      if (qw.length < 3) { out.push(qw); continue; }
+      const qKey = canonicalWordKey(qw);
+      const spellings = tied.map(r => this.typoWordsOf(r).find(rw =>
+        canonicalWordKey(rw) === qKey
+        || (qw.length >= 5 && rw.length >= 5 && wordsAlmostEqual(qw, rw))));
+      if (spellings.some(s => s === undefined)) return undefined;
+      const unique = [...new Set(spellings as string[])];
+      if (unique.length !== 1) return undefined;
+      const word = unique[0]!;
+      // A CASE FOLD IS NOT A TYPO (the KAPITOL MOL regression): the client's
+      // «KAPITOL» and the map's «Capitol» are the same word, and treating the
+      // capitalisation as a correction sent a correctly-spelled query through
+      // the exact pass, which answered the mall by its ENGLISH alias instead of
+      // «Трговски центар Капитол». Only a difference the canonical fold keeps
+      // is a misspelling.
+      if (canonicalWordKey(word) !== qKey) changed = true;
+      out.push(word);
+    }
+    return changed ? out.join(' ') : undefined;
   }
 
   /** DOES THIS LOGGED NAME BIND ON TODAY'S MAP? One implementation for every
