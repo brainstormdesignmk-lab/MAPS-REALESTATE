@@ -35,7 +35,7 @@ function dbgLog(line: string): void {
 import fs from 'fs';
 import { Db } from '../store/db';
 import { FeedLandmark } from '../data/properties';
-import { OfflineMapStore, isShopLevelPlace, type Center } from './offlineMap';
+import { OfflineMapStore, admitsLandmarkClaim, isShopLevelPlace, type Center } from './offlineMap';
 export type { Center } from './offlineMap';
 
 export interface Landmark {
@@ -120,8 +120,9 @@ function feedRosterSlots(
     let lon = pin?.lon;
     let place_url: string | undefined;
     let place_id: string | undefined;
+    let poi: ReturnType<OfflineMapStore['findPoiByName']>;
     if (map?.available) {
-      const poi = map.findPoiByName(name, near);
+      poi = map.findPoiByName(name, near);
       if (poi) {
         if (lat == null || lon == null) { lat = poi.lat; lon = poi.lon; }
         place_url = poi.place_url;
@@ -145,7 +146,13 @@ function feedRosterSlots(
       lon = complex.lon;
       place_url = complex.place_url;
       place_id = complex.place_id;
+      // The slot now names the COMPLEX: enclosingComplex only ever returns a
+      // mall-ranked or centre-named building, i.e. a place that passes the
+      // claim rule by construction. Judging it by the tenant's row (a shop in
+      // it) would refuse the very mall the substitution was made for.
+      poi = undefined;
     }
+
     const key = name.toLowerCase();
     if (seen.has(key)) continue; // one place, one slot (the feed can carry a dupe)
     if (lat == null || lon == null) {
@@ -166,6 +173,33 @@ function feedRosterSlots(
       // line in that case (see whereIsReply), never to an unmeasured pin.
       try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" no centre to measure from\n`); } catch {}
       continue;
+    }
+    // WHO MAY ANCHOR THE CLAIM (the [10:24] capture): the roster was ranked by
+    // DISTANCE at import, so a pharmacy in the flat's own ground floor led it —
+    // «во близина на ПЗУ Аптека Линцура 2», a branch nobody knows and that can
+    // close tomorrow. A roster entry the map can measure is judged by the same
+    // rule as the map's own rotation (admitsLandmarkClaim): a transient
+    // business needs the Google evidence that people name it, a durable public
+    // place needs nothing.
+    //
+    // JUDGED AT ITS OWN PIN, never by the name lookup: the map files one place
+    // under several rows (the same «Рамстор - Сити Мол» is a Supermarket with
+    // no reviews and the Shopping mall with 329), and findPoiByName prefers the
+    // SHORTER name — so a name lookup can hand back a twin that says nothing
+    // about the place the feed pinned. So the map's rows carrying the SAME NAME
+    // within 40 m of the curated point are that one place (they are its twins):
+    // if any of them is claim-worthy, the entry is. A NEIGHBOUR'S evidence is
+    // not the entry's (the pharmacy in the same block shares a 40 m ring with a
+    // restaurant and a grocery) — a row with another name never counts.
+    // An entry the map holds no same-name row for cannot be judged, and keeps
+    // the old contract (a measured curated pin is all we have).
+    if (map?.available && lat != null && lon != null) {
+      const norm = (s: string): string => s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
+      const own = map.nearestPois(lat, lon, 40, 8).filter(po => norm(po.name) === norm(name));
+      if (own.length > 0 && !own.some(po => admitsLandmarkClaim(po))) {
+        try { dbgLog(`[${new Date().toISOString()}] EB ${p.eb}: NEARBY-FEED-SKIP "${name}" (${own[0].type}, ${own[0].review_count ?? 0} review(s)) is not a place a client navigates by\n`); } catch {}
+        continue;
+      }
     }
     const claimM = _distM(near.lat, near.lon, lat, lon);
     if (claimM > FEED_LANDMARK_MAX_M) {
@@ -939,6 +973,14 @@ export class LandmarkService {
           // them (ТЦ Бисер) is what the card names.
           const anchors = pois.filter(po => !isShopLevelPlace(po.name, po.type));
           if (anchors.length > 0) pois = anchors;
+          // …AND THE SAME CLAIM RULE (the [10:24] capture): this is the pass
+          // that MINTS the feed roster, so a storefront admitted here is served
+          // for as long as the roster lives. Unfiltered, the fallback below
+          // happily took the nearest pharmacy in the building and every later
+          // answer named it. UNCONDITIONAL: when nothing in the ring is a place
+          // a client navigates by, the honest answer is the neighbourhood
+          // line — never the best of the refused ones.
+          pois = pois.filter(po => admitsLandmarkClaim(po));
           // Three-tier landmark preference (canonical, typeRank-based):
           //   1. Malls — everyone knows "Беверли Хилс" / "ТЦ Бисер" / "Рамстор"
           //   2. Institutional anchors (schools, hospitals, universities, …)
@@ -1124,6 +1166,12 @@ export class LandmarkService {
         // names a tenant — the complex it stands in is its own POI row and
         // fills the slot honestly.
         .filter(poi => !isShopLevelPlace(poi.name, poi.type))
+        // WHO MAY ANCHOR THE CLAIM (the [10:24] capture): significance rank put
+        // a zero-review pharmacy in the flat's own building ahead of a
+        // kindergarten and every public place in the ring. A transient
+        // business must show that people know it; a durable public place needs
+        // nothing (see admitsLandmarkClaim).
+        .filter(poi => admitsLandmarkClaim(poi))
         .slice(0, 3)
         .map(poi => ({ name: poi.name, distance_m: poi.distance_m, lat: poi.lat!, lon: poi.lon!, place_url: poi.place_url ?? undefined, place_id: poi.place_id ?? undefined }));
     }

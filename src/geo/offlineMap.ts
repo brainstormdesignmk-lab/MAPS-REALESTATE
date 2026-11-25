@@ -21,7 +21,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { appendFileSync, existsSync, readFileSync, renameSync, rmSync, statSync } from 'fs';
 import { distM } from './precision';
-import { normType, typeRank } from './types';
+import { canonicalType, normType, typeRank } from './types';
 
 /** Skopje metro bbox (south, west, north, east) — Центар, Карпош, Аеродром,
  *  Кисела Вода, Влае, Ѓорче Петров, Чаир, Бутел, Гази Баба. */
@@ -2000,72 +2000,90 @@ function meters(a: { lat: number; lon: number }, b: { lat: number; lon: number }
 
 // --- The read store -----------------------------------------------------------
 
-/** POI type priority for landmark selection. Lower = better landmark.
- *  Institutional places (hospitals, schools, government) are universally
- *  recognized navigation anchors. Shops and cafes are only useful when
- *  very close. People say "кај болницата", never "кај фурната". */
-const POI_PRIORITY: Record<string, number> = {
-  // place types — squares are the BEST Skopje landmarks
-  square: 0, plaza: 0,
-  // neighbourhood/locality/suburb are geographic LABELS, not landmarks.
-  // 'во близина на Центар' is meaningless when you ARE in Центар.
-  // Never use as landmarks — excluded from nearestPois entirely.
-  neighbourhood: 100, locality: 100, suburb: 100,
-  // institutional
-  hospital: 1, clinic: 1, healthcare: 1,
-  school: 2, university: 2, college: 2, dormitory: 2,
-  government: 3, townhall: 3, embassy: 3, diplomatic: 3, political_party: 3,
-  stadium: 4, sports_centre: 4, swimming_pool: 4,
-  place_of_worship: 5, church: 5, mosque: 5, synagogue: 5,
-  museum: 6, gallery: 6, theatre: 6, cinema: 6, library: 6,
-  hotel: 7, motel: 7, hostel: 7,
-  mall: 8, shopping_mall: 8, department_store: 8,
-  bank: 9, atm: 9, bureau_de_change: 9,
-  pharmacy: 10, chemist: 10,
-  police: 11, fire_station: 11, ambulance_station: 11,
-  park: 12, garden: 12, playground: 12, nature_reserve: 12,
-  supermarket: 15, convenience: 15,
-  restaurant: 20, cafe: 20, fast_food: 20, bar: 20, pub: 20,
-  bakery: 25, clothes: 25, jewelry: 25, books: 25,
-  fuel: 30, parking: 30,
-  parking_landmark: 7, // named garages ("Катна гаража Беко") — hotel-level landmark
-};
+/** ── THE CLAIM RULE: WHO MAY ANCHOR A CLIENT-FACING «ВО БЛИЗИНА НА» ───────
+ *
+ *  A landmark line is a navigation instruction («каде е?»), so the place it
+ *  names has to be one a client can RECOGNISE and still find next year.
+ *  Significance rank alone answered neither: a pharmacy in the building's own
+ *  ground floor outranked every public place in the ring, and the [10:24]
+ *  capture served «Тоа се наоѓа во близина на ПЗУ Аптека Линцура 2» — a chain
+ *  branch nobody knows by that name, in a shopfront that can close tomorrow.
+ *  (The POI_PRIORITY / PERMANENCE tables that used to sit here read like this
+ *  rule but were never consulted by any caller — dead code removed rather than
+ *  left to mislead the next reader. THIS rule is enforced at every claim site:
+ *  the feed roster, the map-scan rotation and the import-time resolver.)
+ *
+ *  Two ways to qualify:
+ *   • DURABLE_CLAIM_TYPES — public, institutional and green classes whose
+ *     existence does not depend on customers: a school, a church, a park, a
+ *     market, a mall, a hospital, an embassy, a named residential complex.
+ *     Review counts mean nothing for them (Google holds 0 reviews on most
+ *     municipal kindergartens) and their shape is stable for decades.
+ *   • A TRANSIENT BUSINESS — pharmacy, shop, bank, hotel, cafe, clinic, gym,
+ *     fuel — only with EVIDENCE that people know it: KNOWN_PLACE_MIN_REVIEWS
+ *     Google reviews. A branch nobody has reviewed is a storefront, not an
+ *     anchor: «кај Аптека Линцура 2» is not a direction anybody gives.
+ *
+ *  A place the caller cannot judge (a curated name with no map row at all) is
+ *  NOT refused here — only a measured row can be refused for what it is.
+ */
+const DURABLE_CLAIM_TYPES = new Set([
+  // green and civic space — the shape of the city itself
+  'square', 'plaza', 'park', 'garden', 'playground', 'nature_reserve',
+  'monument', 'memorial', 'artwork', 'bridge', 'attraction',
+  // a named street is geography, not a business: it is how the agency's own
+  // description gives directions («преку У. Димитар Миладинов»), and a road
+  // row only ever surfaces when the ring holds nothing else (rank 0).
+  'road', 'street', 'pedestrian_street', 'avenue', 'footway',
+  // natural features outlive every tenant
+  'forest', 'wood', 'hill', 'peak', 'lake', 'river', 'water', 'spring',
+  // faith — «кај Католичка црква» outlives every shop on the street
+  'place_of_worship', 'church', 'cathedral', 'mosque', 'synagogue', 'monastery',
+  // education — municipal institutions, not businesses
+  'school', 'university', 'college', 'kindergarten', 'preschool',
+  'dormitory', 'student_accommodation', 'boarding_school',
+  // health and public administration
+  'hospital', 'government', 'townhall', 'embassy', 'diplomatic', 'courthouse',
+  'police', 'fire_station', 'ambulance_station', 'post_office',
+  // culture and sport — a hall is a BUILDING the whole city names
+  // («Универзална сала»), and a viewpoint is geography itself
+  'museum', 'gallery', 'theatre', 'cinema', 'library',
+  'cultural_center', 'community_centre', 'stadium', 'sports_centre', 'swimming_pool',
+  'hall', 'viewpoint',
+  // commerce that is a BUILDING, not a shopfloor: a market hall, a mall, a
+  // named residential complex — the places Skopje directions are made of
+  'market', 'mall', 'shopping_mall', 'department_store',
+  'residential', 'apartments', 'apartment_complex', 'housing_complex', 'condominium_complex',
+  // …and the GROCERY (the «кај Тинекс» / «кај КАМ» doctrine, pinned in
+  // tests/mall-place-answer.test.ts): Skopje directions are given by the
+  // supermarket on the corner. A pharmacy or a bank is not in that class —
+  // nobody says «кај Аптека Линцура 2».
+  'supermarket', 'convenience', 'grocery', 'greengrocer',
+]);
 
-/** Named parking garages ("Катна гаража Беко") are Skopje landmarks — boost
- *  them from parking (30) to hotel level (7). Generic "Parking" stays at 30. */
-function boostNamedLandmark(type: string, name: string): string {
-  if (type === 'parking' && /каража|гараж|garage/i.test(name)) return 'parking_landmark';
-  return type;
+/** Reviews that prove a transient business is a place people actually name.
+ *  Below this a Google row is a storefront with a phone number: 20 is where a
+ *  Skopje branch has a page enough people used. */
+export const KNOWN_PLACE_MIN_REVIEWS = 20;
+
+/** Geographic LABELS, never landmarks — «во близина на Центар» says nothing
+ *  when you are IN Центар, and a quarter's own pin is not a building. Refused
+ *  whatever the review count says (a whole district collects reviews). */
+const CLAIM_LABEL_TYPES = new Set([
+  'suburb', 'neighbourhood', 'neighborhood', 'locality', 'subdistrict',
+  'city', 'town', 'village', 'settlement', 'administrative_area', 'district',
+]);
+
+/** Does this map row deserve a client-facing landmark claim? See the rule
+ *  above. Pure, so every claim site (roster, rotation, resolver) applies the
+ *  same test and a test can assert it directly. */
+export function admitsLandmarkClaim(p: { type?: string | null; review_count?: number | null }): boolean {
+  const t = canonicalType(p.type);
+  if (CLAIM_LABEL_TYPES.has(t)) return false;
+  if (DURABLE_CLAIM_TYPES.has(t)) return true;
+  return (p.review_count ?? 0) >= KNOWN_PLACE_MIN_REVIEWS;
 }
 
-/** Big chain supermarkets in Skopje — recognized as landmarks when close.
- *  "кај КАМ", "кај Веро", "кај Рамstor" are real navigation phrases. */
-const BIG_CHAIN_RE = /kam|kam\s+market|vero|stokomak|tinex|reptil|kipper|ramstor/i;
-function isBigChain(name: string): boolean {
-  return BIG_CHAIN_RE.test(name);
-}
-
-/** Distance-based priority: malls and big chains nearby are excellent
- *  landmarks — "кај Беверли Хилс" or "кај КАМ Маркет" are what people
- *  actually say. Closer = better priority, with a floor for distant POIs. */
-function effectivePriority(type: string, name: string, distanceM: number): number {
-  const isMall = type === 'mall' || type === 'shopping_mall';
-  // Tier 1-4: malls and big chains (proximity matters most for these)
-  if (isMall && distanceM <= 150) return 1;
-  if (isBigChain(name) && distanceM <= 150) return 2;
-  if (isMall) return 3;
-  if (isBigChain(name)) return 4;
-  // Tier 5+: everything else — shift POI_PRIORITY up so malls/chains always win
-  const base = POI_PRIORITY[type] ?? 50;
-  return base + 10; // squares go from 0→10, hospitals from 1→11, etc.
-}
-
-/** Permanence multiplier: permanent landmarks (parks, churches, schools,
- *  monuments) should beat temporary ones (shops, cafes) even when farther,
- *  because the street reference "кај паркот" will be valid in 10 years;
- *  "кај Алка-У" might not. Multiplier < 1 = lower score = better pick.
- *  A park at ~180m (score ≈ 275) beats a supermarket at 117m (score ≈ 293).
- *  A shop at ≤65m still wins over any permanent landmark (score ≤ 163). */
 /** Address-row provenance. '' = OSM build row (the 7,674 backbone);
  *  'google_street' = a Google-verified street anchor planted by the
  *  self-learning loop (scripts/street-teach.ts, the monthly B3 drain).
@@ -2080,31 +2098,6 @@ function ensureAddressSourceColumn(db: Database.Database): void {
   const cols = (db.prepare('PRAGMA table_info(addresses)').all() as Array<{ name: string }>).map(c => c.name);
   if (!cols.includes('source')) db.exec(ADDR_SOURCE_DDL);
 }
-
-const PERMANENCE: Record<string, number> = {
-  // Permanent — never relocate, decades-long
-  park: 0.55, garden: 0.55, playground: 0.55, nature_reserve: 0.55,
-  place_of_worship: 0.55, church: 0.55, mosque: 0.55, synagogue: 0.55,
-  school: 0.55, university: 0.55, college: 0.55,
-  hospital: 0.55, clinic: 0.55, healthcare: 0.55,
-  government: 0.55, townhall: 0.55, embassy: 0.55, diplomatic: 0.55, political_party: 0.55,
-  stadium: 0.55, sports_centre: 0.55, swimming_pool: 0.55,
-  museum: 0.55, gallery: 0.55, theatre: 0.55, cinema: 0.55, library: 0.55,
-  police: 0.55, fire_station: 0.55, ambulance_station: 0.55,
-  square: 0.55, plaza: 0.55,
-  parking_landmark: 0.55, // named garages are permanent landmarks
-  // Semi-permanent — usually stable but can change
-  hotel: 0.75, motel: 0.75, hostel: 0.75,
-  mall: 0.75, shopping_mall: 0.75, department_store: 0.75,
-  bank: 0.75, atm: 0.75, bureau_de_change: 0.75,
-  pharmacy: 0.75, chemist: 0.75,
-  fuel: 0.75,
-  // Temporary — can open/close within months
-  supermarket: 1.0, convenience: 1.0,
-  restaurant: 1.0, cafe: 1.0, fast_food: 1.0, bar: 1.0, pub: 1.0,
-  bakery: 1.0, clothes: 1.0, jewelry: 1.0, books: 1.0,
-  parking: 1.0, // generic parking, not a named garage
-};
 
 const CYRILLIC_RE = /[\u0400-\u04FF]/;
 /** Do we prefer this spelling in a client-facing answer? The agency speaks
@@ -2232,6 +2225,10 @@ interface PoiIndexRow {
   lon: number;
   place_url?: string;
   place_id?: string;
+  /** Prominence evidence (see admitsLandmarkClaim) — the claim rule reads it. */
+  review_count?: number | null;
+  rating?: number | null;
+  closed?: number | null;
   /** cleanPoiName(name).toLowerCase() — the healed, case-folded row name. */
   low: string;
   /** translitToLatin(low) — the script bridge's form. */
@@ -2263,6 +2260,12 @@ type PoiHit = {
   type?: string;
   place_url?: string;
   place_id?: string;
+  /** Carried so a caller can JUDGE the place, not just locate it — the feed
+   *  roster's claim rule (admitsLandmarkClaim) needs the type's durability and
+   *  the Google evidence behind the name. */
+  review_count?: number | null;
+  rating?: number | null;
+  closed?: number | null;
 };
 
 /** Row TYPES that mean "a residential block", not "a venue": a named complex
@@ -3100,8 +3103,8 @@ export class OfflineMapStore {
     const fold = (s: string): string =>
       s.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean).join(' ');
     this.poiIndex = (this.db.prepare(
-      'SELECT name, type, lat, lon, place_url, place_id FROM pois'
-    ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string }>)
+      'SELECT name, type, lat, lon, place_url, place_id, review_count, rating, closed FROM pois'
+    ).all() as Array<{ name: string; type: string; lat: number; lon: number; place_url?: string; place_id?: string; review_count?: number | null; rating?: number | null; closed?: number | null }>)
       .map(r => {
         const low = cleanPoiName(r.name).toLowerCase();
         const latin = translitToLatin(low);
@@ -3210,7 +3213,8 @@ export class OfflineMapStore {
       // rule): a place filed as «Олимпико» with no class word in its name still
       // DECLARES what it is (mall), and a client who appends «мол» must bind
       // it. Dropping the column here made that impossible at every call site.
-      .map(r => ({ name: r.name, lat: r.lat, lon: r.lon, type: r.type, place_url: r.place_url, place_id: r.place_id }));
+      .map(r => ({ name: r.name, lat: r.lat, lon: r.lon, type: r.type, place_url: r.place_url, place_id: r.place_id,
+        review_count: r.review_count ?? null, rating: r.rating ?? null, closed: r.closed ?? null }));
   }
 
   /** Search POIs by name — for landmark-style addresses like "Кај Бранка"
