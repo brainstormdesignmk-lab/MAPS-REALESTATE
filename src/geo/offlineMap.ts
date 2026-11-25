@@ -783,7 +783,43 @@ const NOT_A_PLACE_ALONE = new Set([
   'прв', 'прва', 'прво', 'втор', 'втора', 'второ', 'трет', 'трета', 'трето',
   'eden', 'edna', 'edno', 'dva', 'dve', 'tri', 'eden', 'еден', 'една', 'едно',
   'два', 'две', 'три', 'cetiri', 'четири',
+  // THE CLIENT'S OWN RECALL VOCABULARY (the [22:17] capture, and the sweep that
+  // followed it). «НЕМОЖАМ ДА СЕ СЕТАМ НА БРОЈЧЕТО» means «I cannot remember the
+  // NUMBER» — nobody names a venue called Бројчето. The sound skeleton made it
+  // «brst», which is EXACTLY «Barista»'s, so the map's typo pass answered with
+  // the café «Barista cafe» (Центар), the coverage guard agreed, and the whole
+  // serve was built around a place the client never mentioned: «Разбрав — значи
+  // баравте стан во близина на Бариста Кафе (Центар)». The same sweep found the
+  // rest of the family: бројот→«Паб Беертија», бројче→«Broz Cafe»,
+  // цифрата→«Зафир», адресата→«Спортска сала Енвер Идризи», катчето→«Американско
+  // катче», влезот→«Влез Барака 2-3», денот→«Bela Dent». These are the words a
+  // client uses to ANSWER and to APOLOGISE — never a venue on their own, exactly
+  // like «сајт» and «стан» above. Both scripts, the definite/article forms the
+  // field actually types, and the diminutives.
+  'broj', 'број', 'brojot', 'бројот', 'brojce', 'бројче', 'brojceto', 'бројчето',
+  'brojki', 'бројки', 'brojkata', 'бројката', 'cifra', 'цифра', 'cifrata', 'цифрата',
+  'cifri', 'цифри', 'adresa', 'адреса', 'adresata', 'адресата', 'adresi', 'адреси',
+  'vlez', 'влез', 'vlezot', 'влезот', 'vlezovi', 'влезови',
+  'kat', 'кат', 'katot', 'катот', 'katce', 'катче', 'katceto', 'катчето', 'katovi', 'катови',
+  'sprat', 'спрат', 'spratot', 'спратот', 'spratovi', 'спратови',
+  'den', 'ден', 'denot', 'денот', 'denovi', 'денови', 'casot', 'часот',
+  'setam', 'сетам', 'setavam', 'сетавам', 'secavam', 'сеќавам', 'pametam', 'паметам',
+  'nemozam', 'неможам', 'neznm', 'незнам', 'znam', 'знам',
 ]);
+
+/** THE ORDINALS ARE THE CARDINALS' SIBLINGS (the [22:17] sweep): the closed-class
+ *  list above already refuses «eden»/«dva»/«tri» and «prv»/«vtor»/«tret» — but a
+ *  client answering «the FIFTH one» writes the inflected definite form
+ *  («петтиот», «petiot»), which no entry covered: its skeleton («ptt») is «Ле
+ *  Петит»'s, so a bar became the search anchor. The family is closed, so it is
+ *  matched as a family — every ordinal stem plus any inflection — instead of
+ *  enumerating the 80 surface forms the field may type. */
+// THE ENDING IS PART OF THE GUARD, not a free tail: a bare stem plus any letters
+// would swallow real names („Петар“, „Седмица“). Only the ordinal endings the
+// field types — «-и/-иот/-ата/-ото/-ите» and their Latin spellings — may follow
+// the stem, with the doubled т that Macedonian writes («петтиот», «petiot»).
+const ORDINAL_STEM_RE =
+  /^(?:prv|прв|vtor|втор|tret|трет|cetvrt|четврт|pet|пет|sest|шест|sedm|седм|osm|осм|devet|девет|deset|десет)(?:t|т)?(?:i|iot|ata|oto|ite|и|иот|ата|ото|ите)$/iu;
 
 /** True when the needle is ONE everyday word that can never name a place.
  *
@@ -818,6 +854,7 @@ export function refusesGenericNeedle(clean: string): boolean {
   if (words.length !== 1) return false;
   if (NOT_A_PLACE_ALONE.has(words[0])) return true;
   if (CLASS_NOUN_IS_A_NAME.has(words[0])) return false;
+  if (ORDINAL_STEM_RE.test(words[0])) return true;
   return placeCategory(words[0]) !== undefined;
 }
 
