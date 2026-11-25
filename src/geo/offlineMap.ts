@@ -2384,6 +2384,15 @@ export class OfflineMapStore {
     if (this.rwDb) { try { this.rwDb.close(); } catch { /* ignore */ } this.rwDb = null; }
   }
 
+  /** EVERY place name the map knows, for the audit sweeps (the feed-wide shop
+   *  screen, the render sweep): a rule is proven over the corpus, never over
+   *  the one name that failed. Ordered by name so a report is stable. */
+  allNames(limit = 50000): string[] {
+    if (!this.db) return [];
+    return (this.db.prepare('SELECT DISTINCT name FROM pois WHERE name IS NOT NULL ORDER BY name LIMIT ?').all(limit) as Array<{ name: string }>)
+      .map((r) => String(r.name));
+  }
+
   stats(): MapStats | null {
     if (!this.db) return null;
     const pois = (this.db.prepare('SELECT COUNT(*) as c FROM pois').get() as { c: number }).c;
